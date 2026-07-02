@@ -6,3 +6,13 @@ venv/
 .env
 test-samples/
 /cache/
+
+# Windows .exe / Linux AppImage / macOS .app builds (see packaging/) --
+# ffmpeg is downloaded fresh by the build workflows, never committed;
+# build/dist are PyInstaller output; the AppDir is assembled fresh by CI.
+/build/
+/dist/
+packaging/windows/vendor/
+packaging/linux/vendor/
+packaging/linux/parztream.AppDir/
+packaging/macos/vendor/

@@ -14,6 +14,9 @@ README.
 - [How login sessions work](#how-login-sessions-work)
 - [Configuration reference](#configuration-reference)
 - [Running as a background service](#running-as-a-background-service)
+- [Building the Windows .exe](#building-the-windows-exe)
+- [Building the Linux AppImage](#building-the-linux-appimage)
+- [Building the macOS app](#building-the-macos-app)
 - [Accessibility](#accessibility)
 - [Testing](#testing)
 
@@ -201,6 +204,247 @@ chance of working too.
 
 These Windows steps are untested — they're written from documented
 behavior, not verified on an actual Windows machine.
+
+## Building the Windows .exe
+
+The Windows executable (`parztream-windows.exe`, offered at the top
+of the main README as the easiest way to get started) is built
+automatically by GitHub Actions
+(`.github/workflows/build-windows-exe.yml`) whenever a version tag
+(e.g. `v1.2.0`) is pushed, and attached to that GitHub Release. You
+can also trigger a build manually from the Actions tab (without a
+tag) to test changes before actually cutting a release — it just
+uploads the exe as a workflow artifact instead.
+
+What the build does:
+
+1. Downloads a static, LGPL-licensed build of `ffmpeg`/`ffprobe` for
+   Windows (from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds))
+   into `packaging/windows/vendor/ffmpeg/` — gitignored, never
+   committed, re-downloaded fresh on every build.
+2. Runs PyInstaller against `packaging/windows/parztream.spec`, which
+   bundles the Python interpreter, all of parztream's dependencies,
+   the `static/` folder, and the two ffmpeg binaries into one
+   `parztream.exe`.
+3. Uploads the result as a workflow artifact, and — for tag-triggered
+   runs only — attaches it to the matching GitHub Release.
+
+`packaging/windows/launcher.py` is the actual entry point (not
+`app/main.py` directly) — it exists specifically to solve problems
+that only exist in a frozen, double-click .exe: it points the
+database and cache at `%APPDATA%\parztream` (a onefile PyInstaller
+build unpacks into a temporary folder that's deleted after every run,
+so the app's own defaults would silently lose the whole library on
+every restart if used as-is), persists a random `PARZTREAM_SECRET_KEY`
+to a file there too (otherwise every launch would log everyone out —
+see [How login sessions work](#how-login-sessions-work)), adds the
+bundled ffmpeg to `PATH`, and opens the default browser automatically
+once the server's actually ready to accept connections rather than
+immediately (which would show a connection-refused page).
+
+The .exe reads the same `PARZTREAM_*` environment variables as
+running from source (see [Configuration reference](#configuration-reference))
+— there's no in-app settings screen for them yet. Set them in Windows
+before double-clicking (e.g. `setx PARZTREAM_PASSWORD your-password`
+in a terminal, then reopen the exe) if you want a password or other
+non-default config.
+
+To build it yourself on a real Windows machine instead of relying on
+CI:
+
+```bash
+pip install -r requirements-build.txt
+rem put ffmpeg.exe and ffprobe.exe in packaging\windows\vendor\ffmpeg\ first
+pyinstaller packaging\windows\parztream.spec --distpath dist
+```
+
+The result is `dist\parztream.exe`.
+
+**Licensing note:** the bundled ffmpeg/ffprobe binaries are
+LGPL-licensed builds, deliberately chosen over a GPL build because
+parztream never needs GPL-only encoders — video is only ever copied,
+never re-encoded (see
+[How playback compatibility works](#how-playback-compatibility-direct-stream-works)).
+If that ever changes, revisit this before switching to a GPL build.
+
+**Not code-signed:** producing a code-signed .exe (so Windows doesn't
+show a "Windows protected your PC" warning) requires a paid
+certificate this project doesn't have. The warning is expected and
+harmless — the README's Troubleshooting section tells users what to
+do about it.
+
+**Honest caveat:** this whole pipeline (the spec file's hidden-imports
+list, the launcher's PATH/data-dir handling, the CI workflow) was
+written and reviewed without access to a real Windows machine — it's
+based on documented PyInstaller/uvicorn/zeroconf behavior, not a
+verified successful build. Treat the first build (a manual
+`workflow_dispatch` run, or a real tag push) as something to actually
+download and test on Windows before trusting it as a release artifact
+— don't assume it works just because CI goes green; a green build only
+means PyInstaller didn't error, not that the resulting exe runs
+correctly.
+
+## Building the Linux AppImage
+
+The Linux build (`parztream-linux-x86_64.AppImage`, offered in the
+main README as the easiest way for non-technical Linux users to get
+started) follows the same overall approach as the Windows `.exe`:
+`packaging/linux/launcher.py` (not `app/main.py`) is the PyInstaller
+entry point, for the same reasons as the Windows launcher — it points
+`PARZTREAM_DB_PATH`/`PARZTREAM_CACHE_DIR` at a persistent location
+instead of wherever PyInstaller happens to unpack itself
+(`sys._MEIPASS`, deleted after every run), following the XDG Base
+Directory spec (`$XDG_DATA_HOME`, or `~/.local/share/parztream`) since
+that's the Linux-native equivalent of Windows' `%APPDATA%`; persists a
+generated `PARZTREAM_SECRET_KEY` there too; adds the bundled
+`ffmpeg`/`ffprobe` to `PATH`; and opens the default browser once the
+server's ready — except on Linux that's expected to silently do
+nothing on a headless server (a genuinely common way this specific app
+gets run), which the launcher accounts for rather than treating as an
+error. Same `setdefault`-not-override behavior for all of these: set
+your own environment variables first (e.g. `export
+PARZTREAM_PASSWORD=...` before running it) for a password or other
+non-default config.
+
+What's specific to Linux/AppImage rather than shared with Windows:
+
+- **AppImage is a packaging format wrapped around the same kind of
+  PyInstaller onefile binary**, not a different build approach.
+  `packaging/linux/parztream.spec` produces a plain self-contained
+  Linux binary first; `packaging/linux/AppRun` (a tiny shell script)
+  and `packaging/linux/parztream.desktop` (name/icon/categories) are
+  what turn that binary plus `static/icon-512.png` into a proper
+  AppDir, which `appimagetool` then packages into the final
+  `.AppImage`. `Terminal=true` in the `.desktop` file is deliberate —
+  it's what makes double-clicking from a file manager still show the
+  startup banner and allow Ctrl+C to stop it, consistent with how the
+  README describes stopping it.
+- **glibc compatibility**: `.github/workflows/build-linux-appimage.yml`
+  builds the PyInstaller binary inside a `manylinux_2_28` Docker
+  container rather than directly on the `ubuntu-latest` runner. A
+  binary built against a bleeding-edge runner's glibc can fail to even
+  start on an older/stabler distro (Debian stable, Ubuntu 22.04, a
+  NAS's Linux, etc.) with a `GLIBC_x.xx not found` error — building
+  against an older baseline avoids that. If PyInstaller/Python version
+  bumps ever require a newer `manylinux` image, re-verify this still
+  holds.
+- **FUSE**: running an AppImage normally needs FUSE, which several
+  modern distros no longer ship by default — this is a real rough edge
+  `.exe` doesn't have. README's Troubleshooting section covers both
+  fixes (install `libfuse2`, or run with
+  `--appimage-extract-and-run`). The build itself sidesteps needing
+  FUSE *in CI* the same way (`appimagetool --appimage-extract-and-run`)
+  — that flag is about building the AppImage in a
+  FUSE-less container, unrelated to whether an end user's machine has
+  FUSE to run the *output* file.
+
+To build the raw binary yourself (without wrapping it into an
+AppImage) on a real Linux machine instead of relying on CI:
+
+```bash
+pip install -r requirements-build.txt
+# put ffmpeg and ffprobe in packaging/linux/vendor/ffmpeg/ first
+pyinstaller packaging/linux/parztream.spec --distpath dist
+```
+
+The result is `dist/parztream` — a single executable file, runnable
+directly (`./dist/parztream`) without needing AppImage at all if
+you don't care about desktop-icon integration.
+
+**Licensing note:** same as the Windows build — the bundled
+ffmpeg/ffprobe are LGPL, not GPL, deliberately, because parztream
+never needs GPL-only encoders. See
+[Building the Windows .exe](#building-the-windows-exe) for the full
+reasoning.
+
+**What's actually been verified vs. not:** unlike the Windows build,
+this one runs on the same OS family this was developed on, so the
+core of it *was* actually tested — the raw PyInstaller binary was
+built and run locally, confirmed to serve the full app correctly
+(setup wizard, static assets, icons) and to write its database/secret
+key to the correct persistent XDG folder. What was **not** verified,
+for lack of Docker in that environment: the `manylinux_2_28`
+containerized build step in CI, and the actual `appimagetool`
+wrapping/FUSE behavior of the final `.AppImage` file. Treat the first
+real CI build (manual `workflow_dispatch`, or a real tag push) as
+something to download and test before trusting it as a release
+artifact, same caveat as the Windows build.
+
+## Building the macOS app
+
+The macOS build (`parztream-macos-arm64.dmg`, offered in the main
+README as the easiest way for Apple Silicon Mac users to get started)
+follows the same overall shape as Windows/Linux, with two
+macOS-specific differences worth understanding before touching any of
+this.
+
+`packaging/macos/launcher.py` is the PyInstaller entry point, for the
+same reasons as the other two launchers — it points
+`PARZTREAM_DB_PATH`/`PARZTREAM_CACHE_DIR` at
+`~/Library/Application Support/parztream` (the standard macOS location
+for this, instead of `%APPDATA%` or the XDG dirs), persists a
+generated `PARZTREAM_SECRET_KEY` there too, adds the bundled
+`ffmpeg`/`ffprobe` to `PATH`, and opens the default browser once the
+server's ready. Same `setdefault`-not-override behavior: set your own
+environment variables first for a password or other non-default
+config.
+
+**Difference 1 — no console by default.** Double-clicking a `.app` on
+macOS gives it no visible Terminal window, unlike Windows' `.exe`
+console or the AppImage's `Terminal=true` `.desktop` entry. Since this
+app's entire "how do I stop it" story is "close the window (or
+Ctrl+C)," running invisibly in the background with no window at all
+would be a real regression — the only way to stop it would be Activity
+Monitor. `packaging/macos/parztream.spec` names the actual compiled
+binary `parztream-bin` and sets `CFBundleExecutable` to `parztream`;
+the build workflow then copies `packaging/macos/parztream-wrapper.sh`
+into `Contents/MacOS/parztream` — a small script that uses `osascript`
+to open a real Terminal window and run `parztream-bin` inside it. This
+is why there are two binaries inside the `.app`, and why the wrapper
+script is a committed file rather than something PyInstaller generates.
+
+**Difference 2 — no LGPL ffmpeg source for macOS.** The Windows/Linux
+builds bundle a specifically LGPL static ffmpeg build (see
+[Building the Windows .exe](#building-the-windows-exe)) so parztream
+never distributes GPL-only encoders it doesn't need. No equivalent
+reliably-available LGPL-only macOS static build exists the same way,
+so `.github/workflows/build-macos-app.yml` installs ffmpeg via
+Homebrew instead — which, by default, is very likely a **GPL** build
+(Homebrew's ffmpeg formula includes x264/x265 and other GPL-licensed
+components unless built with nonstandard flags). This is a
+**deliberate, documented inconsistency** with the Windows/Linux
+policy, not an oversight — if this project ever cares about being
+strictly GPL-clean across all three platforms (e.g. before wider
+public distribution), this needs real attention: either verify exactly
+what Homebrew's ffmpeg formula links against at build time, or source/
+build an LGPL-only macOS ffmpeg deliberately.
+
+**Not code-signed or notarized:** producing a signed, notarized `.app`
+(so Gatekeeper doesn't block it on first launch) requires an Apple
+Developer Program membership ($99/year) plus a notarization step in CI
+using Apple credentials. This project doesn't have that, by explicit
+choice — the Gatekeeper block is expected and documented in the
+README's Troubleshooting section (Control-click → Open, or
+`xattr -cr`) rather than something to silently work around.
+
+**Apple Silicon only:** `target_arch="arm64"` in the spec file and the
+`macos-14` GitHub Actions runner (natively arm64) both reflect this —
+an Intel Mac cannot run this build at all. Revisit if Intel support
+ever becomes worth the doubled build matrix.
+
+**Zero verification, more so than the other two builds:** the Windows
+build was written without a Windows machine but reasoned about
+carefully; the Linux build's core was actually built and run locally.
+This macOS build has **no verification of any kind** — no macOS
+environment was available at all while writing it. The `BUNDLE()`
+Info.plist keys, the `parztream-wrapper.sh` osascript approach, the
+`create-dmg` invocation, and the CI workflow are all based on
+documented behavior, not a single successful run. Before trusting this
+as a release artifact, someone needs to actually build it (CI or
+locally on a Mac) and open the resulting `.app` on real Apple Silicon
+hardware — treat every part of it as unverified until that happens,
+and re-verify here if you touch the spec file, the wrapper script, or
+the workflow.
 
 ## Accessibility
 

@@ -1,0 +1,5 @@
+#!/bin/sh
+# AppImage entry point -- just hands off to the PyInstaller-built binary
+# sitting next to this script inside the AppDir/AppImage.
+HERE="$(dirname "$(readlink -f "${0}")")"
+exec "${HERE}/parztream" "$@"

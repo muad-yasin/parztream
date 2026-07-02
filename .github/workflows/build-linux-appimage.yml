@@ -1,0 +1,84 @@
+name: Build Linux AppImage
+
+# Runs on a version tag push (v1.2.0 etc.) and attaches the result to the
+# matching GitHub Release. Also runnable manually (Actions tab -> this
+# workflow -> "Run workflow") without a tag, which just uploads the
+# AppImage as a build artifact -- use that to test a build before actually
+# cutting a release.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download bundled ffmpeg/ffprobe (LGPL static build)
+        run: |
+          set -eu
+          dest="packaging/linux/vendor/ffmpeg"
+          mkdir -p "$dest"
+          curl -L -o ffmpeg.tar.xz "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz"
+          tar -xf ffmpeg.tar.xz
+          bindir=$(dirname "$(find . -maxdepth 4 -type f -name ffmpeg -path '*/bin/*' | head -n1)")
+          cp "$bindir/ffmpeg" "$bindir/ffprobe" "$dest/"
+
+      - name: Build the onefile binary with PyInstaller
+        # Built inside an older-baseline container (not directly on the
+        # ubuntu-latest runner) specifically for glibc compatibility -- a
+        # PyInstaller binary built against a bleeding-edge Ubuntu runner's
+        # glibc can fail to start at all on an older distro (Debian
+        # stable, Ubuntu 20.04/22.04, etc.) with a "GLIBC_x.xx not found"
+        # error. manylinux_2_28 targets a broadly-compatible glibc
+        # baseline instead. Adjust the cp3xx interpreter path below if
+        # that image's bundled Python versions change.
+        run: |
+          docker run --rm -v "$PWD":/io -w /io quay.io/pypa/manylinux_2_28_x86_64 \
+            /bin/bash -c "
+              set -eu
+              /opt/python/cp312-cp312/bin/pip install -r requirements-build.txt &&
+              /opt/python/cp312-cp312/bin/pyinstaller packaging/linux/parztream.spec --distpath dist --workpath build --noconfirm
+            "
+
+      - name: Assemble the AppDir
+        run: |
+          set -eu
+          appdir=packaging/linux/parztream.AppDir
+          rm -rf "$appdir"
+          mkdir -p "$appdir"
+          cp dist/parztream "$appdir/parztream"
+          cp packaging/linux/AppRun "$appdir/AppRun"
+          cp packaging/linux/parztream.desktop "$appdir/parztream.desktop"
+          cp static/icon-512.png "$appdir/parztream.png"
+          chmod +x "$appdir/AppRun" "$appdir/parztream"
+
+      - name: Download appimagetool
+        run: |
+          curl -L -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x appimagetool
+
+      - name: Build the AppImage
+        run: |
+          # --appimage-extract-and-run sidesteps needing FUSE to run
+          # appimagetool itself inside this CI container -- unrelated to
+          # whether FUSE is needed to run the *output* AppImage later.
+          ./appimagetool --appimage-extract-and-run packaging/linux/parztream.AppDir dist/parztream-x86_64.AppImage
+
+      - name: Rename artifact
+        run: mv dist/parztream-x86_64.AppImage dist/parztream-linux-x86_64.AppImage
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: parztream-linux
+          path: dist/parztream-linux-x86_64.AppImage
+
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/parztream-linux-x86_64.AppImage

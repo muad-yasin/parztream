@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=parztream
+Comment=Self-hosted media server for your home network
+Exec=parztream
+Icon=parztream
+Categories=AudioVideo;Network;
+Terminal=true

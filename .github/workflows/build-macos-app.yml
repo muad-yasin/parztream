@@ -1,0 +1,84 @@
+name: Build macOS app
+
+# Runs on a version tag push (v1.2.0 etc.) and attaches the result to the
+# matching GitHub Release. Also runnable manually (Actions tab -> this
+# workflow -> "Run workflow") without a tag, which just uploads the .dmg
+# as a build artifact -- use that to test a build before actually cutting
+# a release.
+#
+# Apple Silicon (arm64) only for now -- see ADVANCED.md's "Building the
+# macOS app" section for why, and for the (real, unavoidable without an
+# Apple Developer account) unsigned/unnotarized caveat.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+
+      - name: Install ffmpeg/ffprobe via Homebrew
+        # Not the LGPL static builds used for Windows/Linux -- no
+        # equivalent is reliably available for macOS, so this uses
+        # whatever Homebrew's default ffmpeg formula ships (typically a
+        # GPL build, since it includes x264/x265 by default). See
+        # ADVANCED.md for the licensing caveat this creates.
+        run: |
+          brew install ffmpeg
+          dest="packaging/macos/vendor/ffmpeg"
+          mkdir -p "$dest"
+          cp "$(brew --prefix ffmpeg)/bin/ffmpeg" "$dest/"
+          cp "$(brew --prefix ffmpeg)/bin/ffprobe" "$dest/"
+
+      - name: Build with PyInstaller
+        run: pyinstaller packaging/macos/parztream.spec --distpath dist --workpath build --noconfirm
+
+      - name: Replace the app's entry point with the Terminal-launching wrapper
+        run: |
+          set -eu
+          app="dist/parztream.app/Contents/MacOS"
+          cp packaging/macos/parztream-wrapper.sh "$app/parztream"
+          chmod +x "$app/parztream" "$app/parztream-bin"
+
+      - name: Package as a .dmg
+        run: |
+          set -eu
+          brew install create-dmg
+          create-dmg \
+            --volname "parztream" \
+            --window-size 500 300 \
+            --icon-size 100 \
+            --icon "parztream.app" 125 150 \
+            --app-drop-link 375 150 \
+            "dist/parztream-macos-arm64.dmg" \
+            "dist/parztream.app" || true
+          # create-dmg's exit code is unreliable even on a successful build
+          # (a quirk of the AppleScript/Finder automation it uses under
+          # the hood) -- so this checks for the actual output file instead
+          # of trusting $?.
+          test -f "dist/parztream-macos-arm64.dmg"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: parztream-macos
+          path: dist/parztream-macos-arm64.dmg
+
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/parztream-macos-arm64.dmg

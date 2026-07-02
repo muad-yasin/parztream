@@ -14,6 +14,93 @@ and watch or listen to whatever's in that folder.
 This guide assumes you've never used a "terminal" (also called a
 command line or command prompt) before, and walks through every step.
 
+## Windows: the easy way (no installation needed)
+
+If you're on Windows, you can skip everything below and just run a
+single file — no Python, no terminal, nothing to install.
+
+1. Go to the [Releases page](https://github.com/muad-yasin/parztream/releases)
+   and download the latest **`parztream-windows.exe`**.
+2. Double-click it. A window opens showing some startup text, and
+   your web browser opens automatically to your library a moment
+   later.
+3. That's it — parztream is running. To stop it, just close that
+   window.
+
+Windows may show a blue "Windows protected your PC" warning the first
+time you run it — that's expected for a new app like this one, not a
+sign anything's wrong; see [Troubleshooting](#troubleshooting) below
+for why, and how to get past it.
+
+Your settings, library database, and cache are stored in
+`%APPDATA%\parztream`, so they survive being closed and reopened.
+Want it to start automatically when your computer turns on, run as a
+full background service, or set a password? See
+[`ADVANCED.md`](ADVANCED.md).
+
+## Linux: the easy way (no installation needed)
+
+If you're on Linux, you can also skip everything below and run a
+single file — no Python, no virtual environment, nothing to install.
+This works on essentially any 64-bit Linux desktop or server.
+
+1. Go to the [Releases page](https://github.com/muad-yasin/parztream/releases)
+   and download the latest **`parztream-linux-x86_64.AppImage`**.
+2. Make it runnable (most file managers offer this as a right-click
+   "Properties → Permissions" checkbox; from a terminal it's
+   `chmod +x parztream-linux-x86_64.AppImage`).
+3. Run it — double-click from a file manager, or run it from a
+   terminal: `./parztream-linux-x86_64.AppImage`. A window opens
+   showing some startup text, and your browser opens automatically to
+   your library (on a desktop, that is — see the note below for
+   headless servers).
+4. That's it — parztream is running. To stop it, press **Ctrl+C** in
+   that window (or close it).
+
+If you're running this on a **headless server** (no desktop/monitor —
+a common way to run a home media server), the browser obviously won't
+open automatically; the startup text tells you the address to open
+from another device instead, e.g. `http://<server's address>:8000`.
+
+Your settings, library database, and cache are stored in
+`~/.local/share/parztream`, so they survive being closed and reopened.
+Want it to start automatically on boot, run as a full background
+service, or set a password? See [`ADVANCED.md`](ADVANCED.md).
+
+## macOS: the easy way (no installation needed)
+
+If you're on an Apple Silicon Mac (M1 or newer — the vast majority of
+Macs sold since late 2020), you can also skip everything below.
+
+1. Go to the [Releases page](https://github.com/muad-yasin/parztream/releases)
+   and download the latest **`parztream-macos-arm64.dmg`**.
+2. Double-click the `.dmg` — a window opens; drag the **parztream**
+   icon into your **Applications** folder, the way most Mac software
+   installs.
+3. Open parztream from Applications (or Launchpad). The first time,
+   macOS will likely refuse with a warning — that's expected, not a
+   sign anything's wrong; see [Troubleshooting](#troubleshooting)
+   below for exactly what to click.
+4. A Terminal window opens showing some startup text, and your
+   browser opens automatically to your library a moment later. To
+   stop parztream, close that Terminal window (or press Ctrl+C in it).
+
+This build isn't code-signed (that requires a paid Apple Developer
+account), so macOS's Gatekeeper will block it on first launch — see
+[Troubleshooting](#troubleshooting) for the one-time steps to get past
+that.
+
+Your settings, library database, and cache are stored in
+`~/Library/Application Support/parztream`, so they survive being
+closed and reopened. Want it to start automatically at login, or set
+a password? See [`ADVANCED.md`](ADVANCED.md).
+
+On an older, Intel-based Mac? This build won't run — use the
+from-source steps below instead.
+
+**Everyone else** (an Intel Mac, or anyone who'd rather run it from
+source) — follow the steps below instead.
+
 ## What you'll need before starting
 
 - **A computer to run it on.** This computer becomes the "server" —
@@ -208,6 +295,42 @@ start automatically whenever your computer turns on, without you
 opening a terminal each time, see [`ADVANCED.md`](ADVANCED.md).
 
 ## Troubleshooting
+
+**"Windows protected your PC" / "Unknown publisher" when running `parztream-windows.exe`**
+This is normal for a new app and doesn't mean anything's wrong with
+the file. It appears because getting an app "recognized" by Windows
+requires a paid code-signing certificate, which this project doesn't
+have. Click **"More info"**, then **"Run anyway."** If you'd rather
+avoid that warning entirely, you can run parztream from source instead
+using the steps below.
+
+**"parztream.app is damaged and can't be opened" / "Apple could not verify... malware" on macOS**
+This is Gatekeeper, macOS's version of the Windows warning above —
+also expected for a new, unsigned app, not a sign anything's actually
+wrong or damaged. Try, in order:
+1. In Finder, **Control-click (or right-click) the app → Open**, then
+   confirm **"Open"** in the dialog that appears. This works on most
+   macOS versions for a first launch.
+2. If that still refuses, open **Terminal** (Spotlight search →
+   "Terminal") and run:
+   ```bash
+   xattr -cr /Applications/parztream.app
+   ```
+   (adjust the path if you put it somewhere other than Applications),
+   then try opening it again normally.
+
+**"Permission denied" when running the `.AppImage` on Linux**
+It needs to be marked as runnable first — either tick the
+"executable" checkbox in your file manager's Properties/Permissions
+for the file, or run `chmod +x parztream-linux-x86_64.AppImage` in a
+terminal, then try again.
+
+**"dlopen(): error loading libfuse.so.2" or similar when running the `.AppImage`**
+Some newer Linux distributions (recent Ubuntu, Fedora) don't ship
+FUSE by default, which AppImages normally need to run. Either install
+it (e.g. `sudo apt install libfuse2` on Ubuntu/Debian, or the
+equivalent for your distro), or run the AppImage without FUSE by
+adding a flag: `./parztream-linux-x86_64.AppImage --appimage-extract-and-run`.
 
 **"python3 is not recognized" / "python: command not found"**
 Python either isn't installed, or wasn't added to your system's PATH

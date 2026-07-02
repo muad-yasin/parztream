@@ -476,6 +476,141 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   with actual passwords belong outside the repo (`/etc/parztream/`
   or `C:\ProgramData\parztream\`), never committed — only the
   `.example` templates live in `deploy/`.
+- `packaging/windows/` — the Windows `.exe` build (offered in the
+  README as the easiest way for non-technical users to get started,
+  no Python/terminal needed). `launcher.py`, not `app/main.py`, is the
+  actual PyInstaller entry point (`parztream.spec` builds it) — it
+  exists to handle things that only matter once parztream is a frozen,
+  double-clicked exe: pointing `PARZTREAM_DB_PATH`/`PARZTREAM_CACHE_DIR`
+  at a persistent `%APPDATA%\parztream` folder (a PyInstaller onefile
+  build's own temp dir, `sys._MEIPASS`, is deleted after every run —
+  app/config.py's defaults would silently lose the whole library every
+  restart if used as-is here), persisting a generated
+  `PARZTREAM_SECRET_KEY` to a file there too (otherwise every launch
+  would sign everyone out), adding the bundled `ffmpeg`/`ffprobe` to
+  `PATH` (everything in `app/` just calls `"ffmpeg"`/`"ffprobe"` and
+  relies on PATH lookup — no code there needed to change), and opening
+  the default browser once the server's actually accepting connections
+  rather than immediately. These env vars are `setdefault`, not a hard
+  override — set them yourself first (e.g. via `setx`) for a password
+  or other non-default config, same as running from source.
+  `packaging/windows/vendor/ffmpeg/` (gitignored, never committed) is
+  where `.github/workflows/build-windows-exe.yml` puts a downloaded
+  LGPL static ffmpeg build before invoking PyInstaller — deliberately
+  LGPL, not GPL, chosen because parztream never needs GPL-only
+  encoders (video is only ever copied, never re-encoded — see
+  `app/transcode.py`). The exe is unsigned (no code-signing
+  certificate), so Windows SmartScreen shows a warning on first run —
+  expected, documented in the README's Troubleshooting section, not a
+  bug to silently "fix" by suppressing the warning some other way.
+  **This entire pipeline — the spec file's hidden-imports list, the
+  launcher's PATH/data-dir handling, the GitHub Actions workflow —
+  was written without access to a real Windows machine.** It's based
+  on documented PyInstaller/uvicorn/zeroconf behavior, not a verified
+  successful build. A green CI run only means PyInstaller didn't
+  error, not that the resulting exe actually launches correctly on a
+  clean Windows machine — treat the first real build as something to
+  download and manually test on Windows before trusting it, and
+  re-verify here if you touch the spec file, the hidden-imports list,
+  or launcher.py's import-order-dependent env var setup.
+- `packaging/linux/` — the Linux build (`parztream-linux-x86_64.AppImage`,
+  the same "easiest way to get started" pitch as the Windows exe, for
+  Linux users). Same architecture as `packaging/windows/`:
+  `launcher.py` is the PyInstaller entry point, not `app/main.py`,
+  solving the same class of problems — except it uses the XDG Base
+  Directory spec (`$XDG_DATA_HOME`, falling back to
+  `~/.local/share/parztream`) instead of `%APPDATA%` for the
+  persistent data dir, and its browser-open step is expected to
+  silently no-op on a headless server (a genuinely common way this
+  specific app gets run on Linux) rather than being treated as a
+  failure. AppImage itself is just a packaging format wrapped around
+  that same kind of onefile PyInstaller binary — `AppRun` (a one-line
+  shell script exec-ing the bundled binary) and `parztream.desktop`
+  (`Terminal=true` deliberately, so double-clicking from a file
+  manager still shows the startup banner and allows Ctrl+C, matching
+  what the README tells users) turn the binary plus
+  `static/icon-512.png` into an AppDir, which `appimagetool` packages
+  into the final `.AppImage`.
+  `.github/workflows/build-linux-appimage.yml` builds the PyInstaller
+  binary inside a `manylinux_2_28` Docker container rather than
+  directly on the `ubuntu-latest` runner — a binary built against a
+  bleeding-edge runner's glibc can fail to even start on an
+  older/stabler distro with a `GLIBC_x.xx not found` error, and
+  `manylinux_2_28` targets a broadly-compatible baseline instead; if a
+  PyInstaller/Python version bump ever needs a newer manylinux image,
+  re-verify this still holds. `packaging/linux/vendor/ffmpeg/`
+  (gitignored) is where that workflow puts a downloaded LGPL static
+  ffmpeg build before invoking PyInstaller, same licensing reasoning
+  as `packaging/windows/`.
+  Deliberately **no `.deb`/`.rpm`** — decided against them in favor of
+  the portable AppImage, since distro-native packaging only benefits
+  one distro family at a time and mostly helps people already
+  comfortable with a terminal, which cuts against why the exe/AppImage
+  exist in the first place (see README's "the easy way" sections).
+  Running an AppImage normally needs FUSE, which some modern distros
+  (recent Ubuntu, Fedora) don't ship by default — a real rough edge
+  the `.exe` doesn't have, documented in the README's Troubleshooting
+  section (`libfuse2`, or `--appimage-extract-and-run`) rather than
+  something to "fix" by bundling FUSE itself.
+  **Partially verified, unlike the Windows build**: unlike
+  `packaging/windows/`, this one was built and actually run in the
+  same environment it was developed in — the raw PyInstaller binary
+  (not wrapped in AppImage) was confirmed to build and correctly serve
+  the full app (setup wizard, static assets, icons) and write its
+  database/secret key to the right persistent XDG folder. What's
+  **not** verified, for lack of Docker in that environment: the
+  `manylinux_2_28` containerized build step in CI, and the actual
+  `appimagetool` wrapping/FUSE behavior of the final `.AppImage`.
+  Treat the first real CI build as something to actually download and
+  test on Linux before trusting it as a release artifact, and
+  re-verify here if you touch the spec file, `AppRun`, the `.desktop`
+  file, or the CI workflow.
+- `packaging/macos/` — the macOS build (`parztream-macos-arm64.dmg`),
+  same "easiest way to get started" pitch as Windows/Linux, for
+  Apple Silicon Mac users specifically (Intel isn't built at all —
+  `target_arch="arm64"` in the spec, matching the `macos-14` GitHub
+  Actions runner). `launcher.py` follows the same pattern as the other
+  two — persistent data dir at `~/Library/Application Support/parztream`
+  (macOS's equivalent of `%APPDATA%`/XDG dirs), persisted secret key,
+  bundled ffmpeg added to `PATH`, browser opened once ready.
+  Two things that make this build meaningfully different from
+  Windows/Linux, not just "the macOS version of the same thing":
+  1. **A double-clicked `.app` has no console by default** — unlike
+     the `.exe`'s console window or the AppImage's `Terminal=true`
+     `.desktop` entry. Since "close the window / Ctrl+C" is this app's
+     entire stop mechanism, running with no visible window at all
+     would be a real regression (Activity Monitor would be the only
+     way to stop it). The spec names the actual PyInstaller binary
+     `parztream-bin` and sets `CFBundleExecutable` to `parztream`; the
+     build workflow copies the committed
+     `packaging/macos/parztream-wrapper.sh` into
+     `Contents/MacOS/parztream` — an `osascript`-based script that
+     opens a real Terminal window and runs `parztream-bin` inside it.
+     Don't "simplify" this by pointing `CFBundleExecutable` straight
+     at the compiled binary — that silently removes the only way
+     non-technical users have to stop the server.
+  2. **No LGPL ffmpeg source exists for macOS the way BtbN provides
+     for Windows/Linux**, so `.github/workflows/build-macos-app.yml`
+     installs ffmpeg via Homebrew instead, which is very likely a
+     **GPL** build by default (x264/x265 included). This is a known,
+     deliberate inconsistency with the LGPL policy used for
+     Windows/Linux (see `packaging/windows/`), not an oversight — flag
+     it if this project ever needs to be strictly GPL-clean across all
+     three platforms.
+  Also unsigned/unnotarized (no Apple Developer account — that's a
+  real $99/year recurring cost, an explicit decision, not an
+  oversight), so Gatekeeper blocks first launch; documented in the
+  README's Troubleshooting section (Control-click → Open, or
+  `xattr -cr`), not something to route around some other way.
+  **Zero verification, more so than Windows or Linux**: no macOS
+  environment was available at all while building this — not even the
+  partial local testing the Linux build got. Every part of it (the
+  `BUNDLE()` Info.plist keys, the wrapper script's `osascript` syntax,
+  the `create-dmg` invocation, the whole CI workflow) is based on
+  documented behavior only. Don't treat this as working until someone
+  actually builds and runs it on real Apple Silicon hardware, and
+  re-verify here if you touch the spec file, the wrapper script, or
+  the workflow.
 
 Test isolation relies on a quirk worth knowing: `config.py` reads env
 vars into module-level constants at import time, and `db.py`/
