@@ -25,7 +25,8 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Open `http://<host>:8000/` from any device on the LAN. Click
-"Scan library" to (re)index the configured folders.
+"Scan library" to (re)index the configured folders — scanning runs
+in the background, so the UI stays responsive while it works.
 
 ## Configuration
 
@@ -35,3 +36,9 @@ Set via environment variables:
   (`:` on Linux/macOS, `;` on Windows).
 - `PARZTREAM_DB_PATH` — SQLite file location (defaults to
   `parztream.db` in the project root).
+- `PARZTREAM_PASSWORD` — if set, the whole app (UI, API, streaming)
+  requires HTTP Basic Auth with this password. If unset, the server
+  has **no authentication** — anyone who can reach the port can
+  browse and stream. Recommended for anything beyond local testing.
+- `PARZTREAM_USERNAME` — Basic Auth username (defaults to
+  `parztream`), only relevant when `PARZTREAM_PASSWORD` is set.

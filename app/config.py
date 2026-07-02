@@ -11,3 +11,6 @@ DB_PATH = Path(os.environ.get("PARZTREAM_DB_PATH", BASE_DIR / "parztream.db"))
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac"}
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm"}
+
+AUTH_USERNAME = os.environ.get("PARZTREAM_USERNAME", "parztream")
+AUTH_PASSWORD = os.environ.get("PARZTREAM_PASSWORD")

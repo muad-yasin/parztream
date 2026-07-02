@@ -37,13 +37,30 @@ function playMedia(item) {
 
 filterEl.addEventListener("change", loadLibrary);
 
+async function pollScanStatus() {
+  while (true) {
+    const res = await fetch("/api/scan/status");
+    const status = await res.json();
+    if (status.status !== "scanning") {
+      return status;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+
 scanBtn.addEventListener("click", async () => {
   scanBtn.disabled = true;
   scanBtn.textContent = "Scanning...";
-  await fetch("/api/scan", { method: "POST" });
+  const res = await fetch("/api/scan", { method: "POST" });
+  if (res.status !== 409 && !res.ok) {
+    scanBtn.disabled = false;
+    scanBtn.textContent = "Scan library";
+    return;
+  }
+  const status = await pollScanStatus();
   await loadLibrary();
   scanBtn.disabled = false;
-  scanBtn.textContent = "Scan library";
+  scanBtn.textContent = status.status === "error" ? "Scan failed — retry" : "Scan library";
 });
 
 loadLibrary();

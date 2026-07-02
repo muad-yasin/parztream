@@ -1,9 +1,9 @@
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from ..db import get_connection
-from ..scanner import scan_media_dirs
+from ..scanner import get_scan_status, run_claimed_scan, start_scan
 
 router = APIRouter(prefix="/api", tags=["library"])
 
@@ -31,6 +31,13 @@ def get_media(media_id: int):
 
 
 @router.post("/scan")
-def trigger_scan():
-    scan_media_dirs()
-    return {"status": "ok"}
+def trigger_scan(background_tasks: BackgroundTasks):
+    if not start_scan():
+        raise HTTPException(status_code=409, detail="Scan already in progress")
+    background_tasks.add_task(run_claimed_scan)
+    return {"status": "started"}
+
+
+@router.get("/scan/status")
+def scan_status():
+    return get_scan_status()

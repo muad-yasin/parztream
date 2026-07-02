@@ -1,10 +1,42 @@
 import subprocess
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mutagen import File as MutagenFile
 
 from .config import AUDIO_EXTENSIONS, MEDIA_DIRS, VIDEO_EXTENSIONS
 from .db import get_connection
+
+_scan_lock = threading.Lock()
+_scan_state = {"status": "idle", "error": None, "last_scan_at": None}
+
+
+def get_scan_status():
+    return dict(_scan_state)
+
+
+def start_scan():
+    """Try to claim the scan lock. Returns False if a scan is already running."""
+    if not _scan_lock.acquire(blocking=False):
+        return False
+    _scan_state["status"] = "scanning"
+    _scan_state["error"] = None
+    return True
+
+
+def run_claimed_scan():
+    """Run a scan previously claimed with start_scan(). Releases the lock when done."""
+    try:
+        scan_media_dirs()
+    except Exception as exc:
+        _scan_state["status"] = "error"
+        _scan_state["error"] = str(exc)
+    else:
+        _scan_state["status"] = "idle"
+        _scan_state["last_scan_at"] = datetime.now(timezone.utc).isoformat()
+    finally:
+        _scan_lock.release()
 
 
 def scan_media_dirs():

@@ -46,21 +46,39 @@ To sanity-check the backend after changes: start the server, then
   gracefully to `None`/filename if unavailable), and upserts into
   `media` by path. Also deletes DB rows for files no longer found on
   disk. This is the only place file-metadata extraction happens.
+  Scans run in the background (see below), coordinated by a
+  module-level `threading.Lock` plus a `_scan_state` dict
+  (`get_scan_status`/`start_scan`/`run_claimed_scan`) — `start_scan()`
+  claims the lock synchronously so a second concurrent trigger fails
+  fast with 409 instead of racing.
 - `app/routers/library.py` — CRUD-ish read endpoints over the
-  `media` table plus `POST /api/scan` to trigger a rescan
-  synchronously (blocks until the scan finishes; there's no
-  background job queue).
+  `media` table plus `POST /api/scan` (claims the scan lock, then
+  hands the actual scan to FastAPI `BackgroundTasks` — returns
+  immediately) and `GET /api/scan/status` for the frontend to poll.
 - `app/routers/stream.py` — serves file bytes with manual HTTP
-  Range header parsing/`206 Partial Content` support. This is
-  hand-rolled (not `FileResponse`) specifically so seeking works in
-  `<video>`/`<audio>` players. Any change here should preserve Range
-  support — without it, scrubbing/seeking breaks.
+  Range header parsing/`206 Partial Content` support, including
+  suffix ranges (`bytes=-500`) and a proper `416` for out-of-bounds
+  requests. This is hand-rolled (not `FileResponse`) specifically so
+  seeking works in `<video>`/`<audio>` players. Any change here
+  should preserve Range support — without it, scrubbing/seeking
+  breaks. `Content-Type` is derived via `mimetypes.guess_type()` —
+  don't hardcode it, different containers need different MIME types
+  for the browser to play them at all.
+- `app/auth.py` — `BasicAuthMiddleware`, a pure ASGI middleware (not
+  `BaseHTTPMiddleware`, which buffers `StreamingResponse` bodies —
+  that would hurt streaming large files). Gates the entire app,
+  including the static UI and streaming, uniformly. No-ops entirely
+  if `PARZTREAM_PASSWORD` isn't set.
 - `app/main.py` — wires routers and mounts `static/` at `/`. Route
   registration order matters: API routers are included *before* the
   `StaticFiles` mount, since the static mount is a catch-all at `/`.
+  `BasicAuthMiddleware` is added at app level so it covers everything
+  behind it.
 - `static/` — plain JS, no bundler. `app.js` fetches `/api/library`,
-  renders a clickable list, and points an `<audio>`/`<video>` element
-  at `/api/stream/{id}` on click.
+  renders a clickable list, points an `<audio>`/`<video>` element at
+  `/api/stream/{id}` on click, and polls `/api/scan/status` after
+  triggering a scan (the trigger endpoint returns immediately, it
+  doesn't wait for the scan to finish).
 
 ## Conventions
 
@@ -68,4 +86,9 @@ To sanity-check the backend after changes: start the server, then
   everywhere (not hardcoded `:`/`;`) since Windows support is a
   target, not just Linux.
 - Keep metadata extraction failures non-fatal — a single unreadable
-  or corrupt media file should not abort the whole scan.
+  or corrupt media file should not abort the whole scan, and one bad
+  tag field (e.g. malformed title) shouldn't discard sibling fields
+  (e.g. duration) — see the per-field try/except in
+  `_extract_metadata`/`_first_tag`.
+- Auth is intentionally minimal (single shared password, no
+  per-user accounts) — this is a home-LAN tool, not multi-tenant.
