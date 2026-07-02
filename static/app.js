@@ -1,6 +1,7 @@
 const listEl = document.getElementById("media-list");
 const filterEl = document.getElementById("filter");
 const showSelectEl = document.getElementById("show-select");
+const searchInputEl = document.getElementById("search-input");
 const scanBtn = document.getElementById("scan-btn");
 const playerContainer = document.getElementById("player-container");
 const pagerEl = document.getElementById("pager");
@@ -31,18 +32,29 @@ async function loadShowList() {
 async function loadLibrary() {
   const type = filterEl.value;
   const showName = showSelectEl.value;
+  const query = searchInputEl.value.trim();
   const params = new URLSearchParams({ limit: PAGE_SIZE, offset });
   if (type) params.set("media_type", type);
   if (showName) params.set("show_name", showName);
+  if (query) params.set("q", query);
 
   const res = await fetch(`/api/library?${params}`);
   const data = await res.json();
-  renderList(data.items);
+  renderList(data.items, query);
   renderPager(data.total);
 }
 
-function renderList(items) {
+function renderList(items, query) {
   listEl.innerHTML = "";
+
+  if (items.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "empty-message";
+    empty.textContent = query ? `No results for "${query}"` : "No media yet — try scanning the library.";
+    listEl.appendChild(empty);
+    return;
+  }
+
   for (const item of items) {
     const li = document.createElement("li");
 
@@ -156,6 +168,15 @@ filterEl.addEventListener("change", () => {
 showSelectEl.addEventListener("change", () => {
   offset = 0;
   loadLibrary();
+});
+
+let searchDebounceTimer = null;
+searchInputEl.addEventListener("input", () => {
+  clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => {
+    offset = 0;
+    loadLibrary();
+  }, 300);
 });
 
 async function pollScanStatus() {

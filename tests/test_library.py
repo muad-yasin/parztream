@@ -12,17 +12,19 @@ requires_ffmpeg = pytest.mark.skipif(
 
 
 def _insert_media(
-    path, media_type="audio", show_name=None, season_number=None, episode_number=None, duration=None
+    path, media_type="audio", show_name=None, season_number=None, episode_number=None,
+    duration=None, title=None, artist=None, album=None,
 ):
     with get_connection() as conn:
         cur = conn.execute(
             """
             INSERT INTO media
-                (path, media_type, title, size_bytes, show_name, season_number, episode_number, duration)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (path, media_type, title, artist, album, size_bytes,
+                 show_name, season_number, episode_number, duration)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                str(path), media_type, path.stem, path.stat().st_size,
+                str(path), media_type, title or path.stem, artist, album, path.stat().st_size,
                 show_name, season_number, episode_number, duration,
             ),
         )
@@ -69,6 +71,59 @@ def test_list_media_limit_is_clamped_to_a_sane_range(client):
 
     too_small = client.get("/api/library", params={"limit": 0}).json()
     assert too_small["limit"] == 1
+
+
+def test_search_matches_title(client, make_file):
+    _insert_media(make_file("a.mp3"), title="Bohemian Rhapsody")
+    _insert_media(make_file("b.mp3"), title="Some Other Song")
+
+    res = client.get("/api/library", params={"q": "rhapsody"})
+
+    body = res.json()
+    assert body["total"] == 1
+    assert body["items"][0]["title"] == "Bohemian Rhapsody"
+
+
+def test_search_is_case_insensitive_and_matches_substrings(client, make_file):
+    _insert_media(make_file("a.mp3"), title="Bohemian Rhapsody")
+
+    res = client.get("/api/library", params={"q": "RHAP"})
+
+    assert res.json()["total"] == 1
+
+
+def test_search_matches_artist_album_and_show_name(client, make_file):
+    _insert_media(make_file("a.mp3"), title="Track One", artist="Queen")
+    _insert_media(make_file("b.mp3"), title="Track Two", album="Queen's Greatest Hits")
+    _insert_media(
+        make_file("c.mp4"), media_type="video", title="Ep",
+        show_name="Queen: The Story", season_number=1, episode_number=1,
+    )
+    _insert_media(make_file("d.mp3"), title="Unrelated", artist="Nobody")
+
+    res = client.get("/api/library", params={"q": "queen"})
+
+    titles = {i["title"] for i in res.json()["items"]}
+    assert titles == {"Track One", "Track Two", "Ep"}
+
+
+def test_search_combines_with_other_filters(client, make_file):
+    _insert_media(make_file("a.mp3"), media_type="audio", title="Overlap")
+    _insert_media(make_file("b.mp4"), media_type="video", title="Overlap")
+
+    res = client.get("/api/library", params={"q": "overlap", "media_type": "audio"})
+
+    body = res.json()
+    assert body["total"] == 1
+    assert body["items"][0]["media_type"] == "audio"
+
+
+def test_search_with_no_matches_returns_empty(client, make_file):
+    _insert_media(make_file("a.mp3"), title="Something")
+
+    res = client.get("/api/library", params={"q": "nonexistent"})
+
+    assert res.json() == {"items": [], "total": 0, "limit": 100, "offset": 0}
 
 
 def test_list_shows_groups_by_show_name_with_episode_counts(client, make_file):

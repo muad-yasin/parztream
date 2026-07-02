@@ -19,6 +19,7 @@ MAX_PAGE_SIZE = 500
 def list_media(
     media_type: Optional[str] = None,
     show_name: Optional[str] = None,
+    q: Optional[str] = None,
     limit: int = DEFAULT_PAGE_SIZE,
     offset: int = 0,
 ):
@@ -33,6 +34,12 @@ def list_media(
     if show_name:
         conditions.append("show_name = :show_name")
         params["show_name"] = show_name
+    if q:
+        # SQLite's LIKE is case-insensitive for ASCII by default, no extra
+        # work needed there. Not escaping literal % / _ in q -- worst case
+        # is an overly broad match, not a correctness or security issue.
+        conditions.append("(title LIKE :q OR artist LIKE :q OR album LIKE :q OR show_name LIKE :q)")
+        params["q"] = f"%{q}%"
 
     where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
     # Within a show, episode order is more useful than alphabetical title.

@@ -28,13 +28,17 @@ header h1 {
   gap: 0.5rem;
 }
 
-select, button {
+select, button, input[type="search"] {
   font: inherit;
   padding: 0.4rem 0.75rem;
   border-radius: 6px;
   border: 1px solid #3a3f47;
   background: #23262c;
   color: inherit;
+}
+
+input[type="search"] {
+  width: 12rem;
 }
 
 button {
@@ -109,6 +113,13 @@ ul#media-list li:hover {
   object-fit: cover;
   background: #2a2e35;
   flex-shrink: 0;
+}
+
+ul#media-list li.empty-message {
+  padding: 1.5rem 1rem;
+  text-align: center;
+  color: #9aa0aa;
+  cursor: default;
 }
 
 #pager {

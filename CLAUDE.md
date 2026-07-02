@@ -88,7 +88,13 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   clamped to `[1, MAX_PAGE_SIZE]`. It also takes an optional
   `show_name` filter, which switches ordering from alphabetical
   `title` to `season_number, episode_number` — episode order only
-  makes sense once you've already filtered to one show. `GET
+  makes sense once you've already filtered to one show — and an
+  optional `q` search param, a plain `LIKE '%q%'` across
+  title/artist/album/show_name (SQLite's `LIKE` is case-insensitive
+  for ASCII by default; not worth FTS5 for a personal media library's
+  row counts). Not escaping literal `%`/`_` in `q` is a deliberate cut
+  — worst case is an overly broad match, never a correctness/security
+  issue. `GET
   /api/shows` is a separate, deliberately *un*paginated endpoint
   (grouped/aggregated via `GROUP BY show_name`, and the number of
   distinct shows is inherently much smaller than the episode count —
@@ -170,13 +176,17 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   `BasicAuthMiddleware` is added at app level so it covers everything
   behind it.
 - `static/` — plain JS, no bundler. `app.js` fetches `/api/library`
-  (with `limit`/`offset`, tracked in a module-level `offset`
-  variable, reset to 0 on filter change, show-select change, or after
-  a scan), renders a clickable list with a lazy-loaded
-  `<img src="/api/library/{id}/art">` per row (hidden via `onerror` if
-  404), prefixed with `S{season}E{episode}` when `show_name` is set.
-  The shows `<select>` is repopulated from `GET /api/shows` on load
-  and after each scan. `playMedia` probes
+  (with `limit`/`offset`/`q`, tracked in module-level `offset`/search-
+  input state, reset to 0 on filter change, show-select change,
+  search input, or after a scan), renders a clickable list with a
+  lazy-loaded `<img src="/api/library/{id}/art">` per row (hidden via
+  `onerror` if 404), prefixed with `S{season}E{episode}` when
+  `show_name` is set, or an "empty" message (different text for "no
+  media scanned yet" vs. "no search results") when the list is empty.
+  The search `<input>` is debounced 300ms (`searchDebounceTimer`) so
+  it doesn't fire a request per keystroke. The shows `<select>` is
+  repopulated from `GET /api/shows` on load and after each scan.
+  `playMedia` probes
   `/api/stream/{id}` with a tiny `Range: bytes=0-1` request first —
   this both warms the transcode cache before real playback starts and
   lets a `415` (unsupported video codec) show a "download instead"

@@ -29,8 +29,9 @@ Open `http://<host>:8000/` from any device on the LAN. Click
 in the background, so the UI stays responsive while it works. The
 library list shows thumbnails for every item — embedded cover art for
 audio (mp3/FLAC/m4a/m4b), an extracted video frame for video, both
-generated the first time they're requested and cached after — and is
-paginated 50 items at a time.
+generated the first time they're requested and cached after — is
+searchable (title/artist/album/show name, case-insensitive substring
+match), and is paginated 50 items at a time.
 
 ### TV show grouping
 
