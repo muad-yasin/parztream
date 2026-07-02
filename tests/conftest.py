@@ -37,6 +37,10 @@ def isolated_app_state(tmp_path, media_dir, monkeypatch):
     monkeypatch.setattr(artwork, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(cache, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(cache, "CACHE_MAX_BYTES", None)
+    # Real mDNS registration on every test using the `client` fixture would
+    # be slow and, in a sandboxed/CI-like environment, potentially flaky --
+    # app/mdns.py is tested directly (mocked) in tests/test_mdns.py instead.
+    monkeypatch.setattr(config, "MDNS_ENABLED", False)
     db.init_db()
 
     if scanner._scan_lock.locked():

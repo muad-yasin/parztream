@@ -43,7 +43,11 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
 - `app/config.py` — all configuration is read from environment
   variables here (`PARZTREAM_MEDIA_DIRS`, `PARZTREAM_DB_PATH`,
   `PARZTREAM_CACHE_DIR`/`PARZTREAM_CACHE_MAX_BYTES` for
-  `app/transcode.py`'s remux cache and its optional size cap).
+  `app/transcode.py`'s remux cache and its optional size cap;
+  `PARZTREAM_MDNS_ENABLED`/`PARZTREAM_MDNS_HOSTNAME`/`PARZTREAM_PORT`
+  for `app/mdns.py` — `PORT` is purely informational, since the app
+  has no way to introspect what port `uvicorn` was actually started
+  with, it just needs to be kept in sync manually with `--port`).
   Nothing else in the app should read `os.environ` directly. Also
   owns `AUDIO_EXTENSIONS`/`VIDEO_EXTENSIONS` — if you add a new
   extension here, check whether `mimetypes.guess_type()` actually
@@ -285,11 +289,50 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   latter would bind its own independent copy at import time that tests
   monkeypatching `auth.AUTH_PASSWORD` wouldn't reach. Same "quirk" as
   `config.py`'s other consumers, documented further down.
+- `app/network.py` — `get_local_ip()`, the classic "connect a UDP
+  socket to an external address and read what local address the OS
+  picked" trick for guessing this machine's LAN-facing IP. UDP
+  `connect()` never actually sends a packet (connectionless), so this
+  doesn't need real connectivity to work, just a configured route.
+- `app/mdns.py` — advertises `http://<MDNS_HOSTNAME>.local:<PORT>/`
+  over mDNS via the `zeroconf` package, so LAN devices that support it
+  can reach the server without knowing its IP (see README's "Finding
+  the server" for the real per-platform support picture — it's
+  genuinely inconsistent on Windows/Android, not just theoretically).
+  **`start_mdns()` spins up a background `threading.Thread` rather
+  than registering inline — this is load-bearing, not a style choice.**
+  Confirmed live: calling `zeroconf`'s sync `register_service()`
+  directly from inside the FastAPI lifespan reliably raises
+  `zeroconf._exceptions.EventLoopBlocked`, because zeroconf's sync API
+  schedules work on its own internal event loop via
+  `run_coroutine_threadsafe` and waits for it, and doing that from a
+  thread that's already running *another* event loop (uvicorn's, which
+  the lifespan runs on) contends and times out. A plain background
+  thread sidesteps it entirely. If you ever refactor this, re-verify
+  against a real running server (`tests/test_mdns.py`'s mocked tests
+  wouldn't have caught this — only the real round-trip test would, and
+  only if it were run against a genuinely async-hosted app; `tests/`
+  uses `TestClient`, which never triggered this because it runs
+  its own event loop differently than uvicorn does under `--reload`).
+  Registration failure of any kind is always non-fatal — logs a
+  warning, never raises — the server works fine by IP either way.
+  `stop_mdns()` unregisters + closes on app shutdown; also safe to
+  call if `start_mdns()` never successfully registered.
 - `app/main.py` — wires routers and mounts `static/` at `/`. Route
   registration order matters: API routers are included *before* the
   `StaticFiles` mount, since the static mount is a catch-all at `/`.
   `SessionAuthMiddleware` is added at app level so it covers everything
-  behind it.
+  behind it. Explicitly attaches a `StreamHandler` to the `"parztream"`
+  logger and sets `propagate = False` — without an actual handler,
+  Python's logging module only surfaces `WARNING`+ via its built-in
+  fallback ("handler of last resort"), regardless of what level is set
+  on the logger itself. Confirmed live: the `PARZTREAM_PASSWORD` unset
+  warning showed up in the console fine, but `app/mdns.py`'s
+  successful-registration `info()` log line silently didn't, which
+  looked exactly like mDNS had failed even though it hadn't. If you
+  add more `logger.info()` calls elsewhere expecting them to be
+  visible, they'll work now that this is fixed — don't rediscover this
+  the hard way.
 - `static/` — plain JS, no bundler. `app.js` fetches `/api/library`
   (with `limit`/`offset`/`q`, tracked in module-level `offset`/search-
   input state, reset to 0 on filter change, show-select change,
@@ -417,6 +460,10 @@ a value another module already imported from `config` (rather than
 importing straight from `config` itself), prefer referencing the
 other module's attribute at call time over re-importing from `config`
 directly — keeps there being one obvious place tests need to patch.
+`app/mdns.py` follows the same rule from the start (`from . import
+config`, then `config.MDNS_ENABLED`/etc. throughout) rather than
+`from .config import MDNS_ENABLED` — same reasoning, applied
+proactively rather than fixed after the fact.
 
 If you add a new config value, follow the same pattern rather than
 trying to override the environment mid-test.

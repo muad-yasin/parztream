@@ -48,3 +48,18 @@ SECRET_KEY = os.environ.get("PARZTREAM_SECRET_KEY") or secrets.token_hex(32)
 # affected by frequent forced re-logins are exactly the least technical
 # users this is meant to be easy for.
 SESSION_MAX_AGE = 60 * 60 * 24 * 90
+
+# The name advertised over mDNS -- http://<this>.local:<PORT>/ (see
+# app/mdns.py). Also handy as the machine's actual OS hostname (a separate,
+# manual deployment step -- see README) so plain http://<this>:PORT/ also
+# resolves on networks whose router auto-registers DHCP hostnames.
+MDNS_HOSTNAME = os.environ.get("PARZTREAM_MDNS_HOSTNAME", "parztream")
+
+# Purely informational for the mDNS advertisement -- the app has no way to
+# introspect what port uvicorn was actually started with, so this must be
+# kept in sync with whatever --port is passed on the command line (see
+# deploy/ templates). Wrong value just means the advertised address points
+# at a port nothing's listening on; doesn't affect the app itself.
+PORT = int(os.environ.get("PARZTREAM_PORT", "8000"))
+
+MDNS_ENABLED = os.environ.get("PARZTREAM_MDNS_ENABLED", "true").lower() not in ("0", "false", "no")

@@ -31,6 +31,21 @@ files on the server through the streaming/download endpoints.
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
+### Finding the server without hunting for its IP
+
+parztream advertises itself over mDNS on startup, so **`http://parztream.local:8000/`** works from any device on the LAN whose OS/browser supports it — no need to look up or remember an IP address, and it keeps working even if that IP changes later (a router reboot, a new DHCP lease, etc.). This is on by default and needs nothing configured; if you ever need to turn it off (e.g. a network where multicast traffic is filtered or unwelcome), set `PARZTREAM_MDNS_ENABLED=false`.
+
+Real support varies by platform, worth knowing honestly rather than assuming it "just works" everywhere:
+- **macOS, iOS, Linux** — reliable out of the box (this is what Apple calls Bonjour; Avahi covers Linux).
+- **Windows** — inconsistent; some versions/configurations resolve `.local` names fine, others need Apple's Bonjour component installed (it comes bundled with iTunes, or can be installed standalone) to work reliably.
+- **Android browsers** — the weakest link; Android supports mDNS at the OS level, but browser resolution of `.local` names in the address bar is unreliable across versions.
+
+**A second, independent path that covers different ground**: set the server machine's actual OS hostname to `parztream` (e.g. `sudo hostnamectl set-hostname parztream` on Linux; the equivalent System Properties change on Windows). Many home routers (anything running `dnsmasq` under the hood — common on ISP-provided routers and virtually all OpenWrt/DD-WRT setups) automatically register a device's DHCP hostname into the router's own local DNS resolver. On networks where that's true, **plain `http://parztream:8000/` — no `.local` suffix — works identically on every device**, including the Windows/Android cases where mDNS is weakest, because it's resolved as ordinary DNS through the router your devices already use, not through anything client-side. This depends on your specific router's firmware, which parztream has no way to detect or guarantee — but it costs nothing extra to also enable, and the two mechanisms cover different networks, so setting both gives the broadest realistic coverage.
+
+Neither is a 100% guarantee on every possible network with zero setup — that's not achievable purely through the browser address bar, not a gap in this app specifically. The server's IP address always works too, as the reliable fallback.
+
+Two related environment variables, if you ever need them: `PARZTREAM_MDNS_HOSTNAME` (defaults to `parztream`) to advertise a different name, and `PARZTREAM_PORT` (defaults to `8000`) which **must match** whatever `--port` you actually start uvicorn with — the app has no way to introspect that itself, it only affects what port number gets included in the mDNS advertisement.
+
 Open `http://<host>:8000/` from any device on the LAN. If no media
 folders are configured yet, you'll land on a setup page with a
 built-in folder browser — no need to know a folder's exact path or
@@ -176,6 +191,19 @@ Set via environment variables:
   **no limit, no automatic pruning** — deleting cached files nobody
   asked to be capped isn't a sane default. An evicted file isn't
   lost, just re-derived (cheaply) the next time it's played.
+- `PARZTREAM_MDNS_ENABLED` — set to `false` to turn off the
+  `parztream.local` mDNS advertisement described above. On by
+  default.
+- `PARZTREAM_MDNS_HOSTNAME` — the name advertised over mDNS (defaults
+  to `parztream`, i.e. `parztream.local`). Change this if you're
+  running more than one parztream instance on the same LAN.
+- `PARZTREAM_PORT` — **must match** whatever `--port` you actually
+  start `uvicorn` with (defaults to `8000`, matching every example in
+  this README). Purely informational: the app can't introspect its
+  own actual port, so this only controls what port number gets
+  included in the mDNS advertisement — a mismatch doesn't break
+  anything else, it just means `parztream.local` would point at the
+  wrong port.
 
 ## Running as a service
 
@@ -208,6 +236,14 @@ for running it as a persistent background service are in `deploy/`.
    ```
 4. Check status/logs: `systemctl status parztream`, `journalctl -u parztream -f`.
 
+Optional but recommended, for the reasons in "Finding the server"
+above: set the machine's actual OS hostname so plain
+`http://parztream:8000/` has a chance of working too, on top of the
+`parztream.local` mDNS name the app advertises on its own:
+```bash
+sudo hostnamectl set-hostname parztream
+```
+
 Edit `User`/`WorkingDirectory`/`ExecStart` in the unit file first if
 your paths or username differ from the example. Don't add
 `--workers` to `ExecStart` — scan status/locking lives in one
@@ -229,6 +265,11 @@ gets you a runnable script. To make it persistent, either:
 - **[NSSM](https://nssm.cc/)** — wraps the batch script as an actual
   Windows service with restart-on-failure, closer to the systemd
   setup above.
+
+Optional but recommended, same reasoning as the Linux step above: set
+the machine's actual computer name to `parztream` (System Properties
+→ Computer Name → Change), so plain `http://parztream:8000/` has a
+chance of working too, on top of the `parztream.local` mDNS name.
 
 These Windows steps are untested — they're written from documented
 behavior, not verified on an actual Windows machine.
