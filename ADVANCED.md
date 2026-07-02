@@ -1,13 +1,14 @@
 # Advanced usage
 
 This page covers everything that didn't fit in the beginner-friendly
-[`README.md`](README.md): network details, configuration options,
-running parztream as a background service, accessibility notes, and
-testing. It assumes you've already got parztream running via the main
-README.
+[`README.md`](README.md): running from source, network details,
+configuration options, running parztream as a background service,
+accessibility notes, testing, and how the three downloadable builds
+themselves are put together.
 
 ## Contents
 
+- [Running from source](#running-from-source)
 - [Finding parztream on your network](#finding-parztream-on-your-network)
 - [How playback compatibility ("Direct Stream") works](#how-playback-compatibility-direct-stream-works)
 - [Mobile/PWA details](#mobilepwa-details)
@@ -19,6 +20,97 @@ README.
 - [Building the macOS app](#building-the-macos-app)
 - [Accessibility](#accessibility)
 - [Testing](#testing)
+
+## Running from source
+
+The [README](README.md) covers the download-and-run builds for
+Windows, Linux (x86_64), and macOS (Apple Silicon). Running from
+source is for anyone those don't cover — an Intel Mac, a different
+CPU architecture — or who wants to contribute to the code.
+
+### What you'll need
+
+- **Python, version 3.10 or newer.** Download it for free from
+  [python.org/downloads](https://www.python.org/downloads/).
+  - **On Windows:** tick **"Add Python to PATH"** during
+    installation — easy to miss, and without it none of the steps
+    below will work.
+  - **On macOS:** use the python.org installer; macOS's built-in
+    Python is too old.
+  - **On Linux:** most distributions already have Python installed.
+- **(Optional, but recommended) ffmpeg** — lets parztream generate
+  video thumbnails, show video length, and play a wider range of
+  video files. The downloadable builds already include this;
+  building from source doesn't. Get it from
+  [ffmpeg.org/download.html](https://ffmpeg.org/download.html);
+  parztream works without it, just with a bit less compatibility.
+
+### Step-by-step
+
+1. **Get the project files.**
+   - **Option A — download the ZIP**: on the
+     [project page](https://github.com/muad-yasin/parztream), click
+     **Code → Download ZIP**, then unzip it.
+   - **Option B — clone with git** (if you already have it):
+     ```bash
+     git clone https://github.com/muad-yasin/parztream.git
+     ```
+2. **Open a terminal in that folder** — File Explorer's address bar,
+   type `cmd`, Enter (Windows); Finder → Services → New Terminal at
+   Folder (macOS); most Linux file managers have "Open Terminal Here."
+3. **Create and activate a virtual environment** (a private space for
+   parztream's dependencies, so they don't mix with anything else on
+   your system):
+   ```bash
+   python3 -m venv .venv
+   ```
+   Then activate it — you'll see `(.venv)` appear at the start of
+   your terminal prompt:
+   - **Windows:** `.venv\Scripts\activate`
+   - **macOS/Linux:** `source .venv/bin/activate`
+
+   You'll need to repeat just this activation step every time you
+   come back to run parztream later — not the whole setup.
+4. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+5. **Start it:**
+   ```bash
+   uvicorn app.main:app --host 0.0.0.0 --port 8000
+   ```
+   Leave this window open — closing it stops parztream. Open
+   `http://localhost:8000` in a browser; see the README's
+   [How to use it](README.md#how-to-use-it) from there.
+
+To run it again later: open a terminal in the project folder,
+activate the virtual environment (step 3's activation command), then
+run the `uvicorn` command from step 5 again.
+
+### Troubleshooting (source installs)
+
+**"python3 is not recognized" / "python: command not found"**
+Python either isn't installed, or wasn't added to PATH. Reinstall
+from [python.org/downloads](https://www.python.org/downloads/),
+ticking "Add Python to PATH" on Windows. Also try the other name
+(`python` instead of `python3`, or vice versa).
+
+**"pip is not recognized" / "pip: command not found"**
+Use `python3 -m pip install -r requirements.txt` (or
+`python -m pip install -r requirements.txt` on Windows) instead of
+plain `pip`.
+
+**"No module named ..." error when starting the server**
+Your virtual environment probably isn't activated for this terminal
+window. Re-run the activation command (step 3 above) and try again.
+
+**"Address already in use"**
+Something else is using port 8000. Close that program, or start on a
+different port instead:
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8001
+```
+then visit `http://localhost:8001`.
 
 ## Finding parztream on your network
 
