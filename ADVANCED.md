@@ -320,14 +320,23 @@ What's specific to Linux/AppImage rather than shared with Windows:
   startup banner and allow Ctrl+C to stop it, consistent with how the
   README describes stopping it.
 - **glibc compatibility**: `.github/workflows/build-linux-appimage.yml`
-  builds the PyInstaller binary inside a `manylinux_2_28` Docker
-  container rather than directly on the `ubuntu-latest` runner. A
-  binary built against a bleeding-edge runner's glibc can fail to even
-  start on an older/stabler distro (Debian stable, Ubuntu 22.04, a
-  NAS's Linux, etc.) with a `GLIBC_x.xx not found` error — building
-  against an older baseline avoids that. If PyInstaller/Python version
-  bumps ever require a newer `manylinux` image, re-verify this still
-  holds.
+  builds the PyInstaller binary inside a `python:3.12-slim-bullseye`
+  Docker container (Debian 11, glibc 2.31) rather than directly on the
+  `ubuntu-latest` runner. A binary built against a bleeding-edge
+  runner's glibc can fail to even start on an older/stabler distro
+  (Debian stable, Ubuntu 22.04, a NAS's Linux, etc.) with a
+  `GLIBC_x.xx not found` error — building against an older baseline
+  avoids that. This used to be a `manylinux_2_28` image instead, which
+  seemed like the more obvious choice (it's specifically built for
+  producing broadly-compatible Linux binaries) — but manylinux images
+  build Python *without* a shared library (`libpythonX.Y.so`), since
+  they're meant for building wheels, not standalone executables, and
+  PyInstaller hard-requires one ("Python was built without a shared
+  library"). Confirmed live in the very first real release build — not
+  a hypothetical. The official `python:*-slim` images are built with
+  `--enable-shared` and don't have this problem. If a future
+  PyInstaller/Python bump needs a newer glibc baseline, move to a newer
+  Debian-based `python:*-slim` tag, not back to manylinux.
 - **FUSE**: running an AppImage normally needs FUSE, which several
   modern distros no longer ship by default — this is a real rough edge
   `.exe` doesn't have. README's Troubleshooting section covers both

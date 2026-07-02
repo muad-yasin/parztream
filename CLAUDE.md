@@ -532,13 +532,19 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   `static/icon-512.png` into an AppDir, which `appimagetool` packages
   into the final `.AppImage`.
   `.github/workflows/build-linux-appimage.yml` builds the PyInstaller
-  binary inside a `manylinux_2_28` Docker container rather than
-  directly on the `ubuntu-latest` runner — a binary built against a
-  bleeding-edge runner's glibc can fail to even start on an
-  older/stabler distro with a `GLIBC_x.xx not found` error, and
-  `manylinux_2_28` targets a broadly-compatible baseline instead; if a
-  PyInstaller/Python version bump ever needs a newer manylinux image,
-  re-verify this still holds. `packaging/linux/vendor/ffmpeg/`
+  binary inside a `python:3.12-slim-bullseye` Docker container (Debian
+  11, glibc 2.31) rather than directly on the `ubuntu-latest` runner —
+  a binary built against a bleeding-edge runner's glibc can fail to
+  even start on an older/stabler distro with a `GLIBC_x.xx not found`
+  error. **Not** a `manylinux` image, despite that seeming like the
+  obvious choice for "broadly compatible Linux binary" — manylinux
+  images build Python without a shared library (they're meant for
+  building wheels, not standalone executables), which makes
+  PyInstaller fail outright ("Python was built without a shared
+  library"). Confirmed live: this broke the actual first release build.
+  If a future PyInstaller/Python bump needs a newer glibc baseline,
+  move to a newer Debian-based `python:*-slim` tag, not back to
+  manylinux. `packaging/linux/vendor/ffmpeg/`
   (gitignored) is where that workflow puts a downloaded LGPL static
   ffmpeg build before invoking PyInstaller, same licensing reasoning
   as `packaging/windows/`.

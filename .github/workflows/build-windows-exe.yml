@@ -5,6 +5,9 @@ name: Build Windows executable
 # workflow -> "Run workflow") without a tag, which just uploads the exe as
 # a build artifact -- use that to test a build before actually cutting a
 # release.
+permissions:
+  contents: write
+
 on:
   push:
     tags:

@@ -9,6 +9,9 @@ name: Build macOS app
 # Apple Silicon (arm64) only for now -- see ADVANCED.md's "Building the
 # macOS app" section for why, and for the (real, unavoidable without an
 # Apple Developer account) unsigned/unnotarized caveat.
+permissions:
+  contents: write
+
 on:
   push:
     tags:

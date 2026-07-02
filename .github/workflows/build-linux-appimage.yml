@@ -5,6 +5,9 @@ name: Build Linux AppImage
 # workflow -> "Run workflow") without a tag, which just uploads the
 # AppImage as a build artifact -- use that to test a build before actually
 # cutting a release.
+permissions:
+  contents: write
+
 on:
   push:
     tags:
@@ -33,15 +36,19 @@ jobs:
         # PyInstaller binary built against a bleeding-edge Ubuntu runner's
         # glibc can fail to start at all on an older distro (Debian
         # stable, Ubuntu 20.04/22.04, etc.) with a "GLIBC_x.xx not found"
-        # error. manylinux_2_28 targets a broadly-compatible glibc
-        # baseline instead. Adjust the cp3xx interpreter path below if
-        # that image's bundled Python versions change.
+        # error. Uses the official python:3.12-slim-bullseye image (Debian
+        # 11, glibc 2.31) rather than a manylinux image -- manylinux images
+        # build Python *without* a shared library (they're meant for
+        # building wheels, not standalone executables), which makes
+        # PyInstaller fail outright with "Python was built without a
+        # shared library" -- confirmed live, this is not hypothetical.
+        # The official python:slim images are built with --enable-shared.
         run: |
-          docker run --rm -v "$PWD":/io -w /io quay.io/pypa/manylinux_2_28_x86_64 \
+          docker run --rm -v "$PWD":/io -w /io python:3.12-slim-bullseye \
             /bin/bash -c "
               set -eu
-              /opt/python/cp312-cp312/bin/pip install -r requirements-build.txt &&
-              /opt/python/cp312-cp312/bin/pyinstaller packaging/linux/parztream.spec --distpath dist --workpath build --noconfirm
+              pip install -r requirements-build.txt &&
+              pyinstaller packaging/linux/parztream.spec --distpath dist --workpath build --noconfirm
             "
 
       - name: Assemble the AppDir
