@@ -2,24 +2,69 @@ const listEl = document.getElementById("media-list");
 const filterEl = document.getElementById("filter");
 const scanBtn = document.getElementById("scan-btn");
 const playerContainer = document.getElementById("player-container");
+const pagerEl = document.getElementById("pager");
+
+const PAGE_SIZE = 50;
+let offset = 0;
 
 async function loadLibrary() {
   const type = filterEl.value;
-  const url = type ? `/api/library?media_type=${type}` : "/api/library";
-  const res = await fetch(url);
-  const items = await res.json();
-  renderList(items);
+  const params = new URLSearchParams({ limit: PAGE_SIZE, offset });
+  if (type) params.set("media_type", type);
+
+  const res = await fetch(`/api/library?${params}`);
+  const data = await res.json();
+  renderList(data.items);
+  renderPager(data.total);
 }
 
 function renderList(items) {
   listEl.innerHTML = "";
   for (const item of items) {
     const li = document.createElement("li");
-    const label = item.artist ? `${item.title} — ${item.artist}` : item.title;
-    li.textContent = label || item.path;
+
+    const img = document.createElement("img");
+    img.className = "thumb";
+    img.loading = "lazy";
+    img.src = `/api/library/${item.id}/art`;
+    img.onerror = () => { img.style.visibility = "hidden"; };
+    li.appendChild(img);
+
+    const label = document.createElement("span");
+    label.textContent = item.artist ? `${item.title} — ${item.artist}` : (item.title || item.path);
+    li.appendChild(label);
+
     li.addEventListener("click", () => playMedia(item));
     listEl.appendChild(li);
   }
+}
+
+function renderPager(total) {
+  pagerEl.innerHTML = "";
+  if (total === 0) return;
+
+  const prevBtn = document.createElement("button");
+  prevBtn.textContent = "Prev";
+  prevBtn.disabled = offset === 0;
+  prevBtn.addEventListener("click", () => {
+    offset = Math.max(0, offset - PAGE_SIZE);
+    loadLibrary();
+  });
+
+  const info = document.createElement("span");
+  const start = offset + 1;
+  const end = Math.min(offset + PAGE_SIZE, total);
+  info.textContent = `${start}-${end} of ${total}`;
+
+  const nextBtn = document.createElement("button");
+  nextBtn.textContent = "Next";
+  nextBtn.disabled = offset + PAGE_SIZE >= total;
+  nextBtn.addEventListener("click", () => {
+    offset += PAGE_SIZE;
+    loadLibrary();
+  });
+
+  pagerEl.append(prevBtn, info, nextBtn);
 }
 
 function playMedia(item) {
@@ -35,7 +80,10 @@ function playMedia(item) {
   playerContainer.appendChild(el);
 }
 
-filterEl.addEventListener("change", loadLibrary);
+filterEl.addEventListener("change", () => {
+  offset = 0;
+  loadLibrary();
+});
 
 async function pollScanStatus() {
   while (true) {
@@ -58,6 +106,7 @@ scanBtn.addEventListener("click", async () => {
     return;
   }
   const status = await pollScanStatus();
+  offset = 0;
   await loadLibrary();
   scanBtn.disabled = false;
   scanBtn.textContent = status.status === "error" ? "Scan failed — retry" : "Scan library";

@@ -26,7 +26,9 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 Open `http://<host>:8000/` from any device on the LAN. Click
 "Scan library" to (re)index the configured folders — scanning runs
-in the background, so the UI stays responsive while it works.
+in the background, so the UI stays responsive while it works. The
+library list shows embedded cover art where available (mp3/FLAC/
+m4a/m4b) and is paginated 50 items at a time.
 
 ## Configuration
 

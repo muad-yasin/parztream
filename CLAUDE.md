@@ -68,6 +68,19 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   `media` table plus `POST /api/scan` (claims the scan lock, then
   hands the actual scan to FastAPI `BackgroundTasks` — returns
   immediately) and `GET /api/scan/status` for the frontend to poll.
+  `GET /api/library` is paginated — it returns
+  `{items, total, limit, offset}`, not a bare array; `limit` is
+  clamped to `[1, MAX_PAGE_SIZE]`. `GET /api/library/{id}/art` serves
+  embedded cover art (extracted on-demand via `app/artwork.py`, not
+  cached anywhere), 404s if the file has none.
+- `app/artwork.py` — pulls embedded cover art out of audio files
+  (ID3 `APIC` for mp3, `covr` for MP4-family containers, FLAC
+  `pictures`) via `mutagen`, re-reading the file fresh on every
+  request rather than caching — simplest option, and no place yet
+  where that's shown to be a bottleneck. Video thumbnails
+  (would need decoding a frame via `ffmpeg`) aren't implemented;
+  `get_cover_art` returns `None` immediately for `media_type ==
+  "video"`.
 - `app/routers/stream.py` — serves file bytes with manual HTTP
   Range header parsing/`206 Partial Content` support, including
   suffix ranges (`bytes=-500`) and a proper `416` for out-of-bounds
@@ -87,11 +100,14 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   `StaticFiles` mount, since the static mount is a catch-all at `/`.
   `BasicAuthMiddleware` is added at app level so it covers everything
   behind it.
-- `static/` — plain JS, no bundler. `app.js` fetches `/api/library`,
-  renders a clickable list, points an `<audio>`/`<video>` element at
-  `/api/stream/{id}` on click, and polls `/api/scan/status` after
-  triggering a scan (the trigger endpoint returns immediately, it
-  doesn't wait for the scan to finish).
+- `static/` — plain JS, no bundler. `app.js` fetches `/api/library`
+  (with `limit`/`offset`, tracked in a module-level `offset`
+  variable, reset to 0 on filter change or after a scan), renders a
+  clickable list with a lazy-loaded `<img src="/api/library/{id}/art">`
+  per row (hidden via `onerror` if 404), points an `<audio>`/
+  `<video>` element at `/api/stream/{id}` on click, and polls
+  `/api/scan/status` after triggering a scan (the trigger endpoint
+  returns immediately, it doesn't wait for the scan to finish).
 
 Test isolation relies on a quirk worth knowing: `config.py` reads env
 vars into module-level constants at import time, and `db.py`/

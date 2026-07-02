@@ -75,6 +75,9 @@ ul#media-list {
 }
 
 ul#media-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
   padding: 0.6rem 1rem;
   border-bottom: 1px solid #2a2e35;
   cursor: pointer;
@@ -86,4 +89,22 @@ ul#media-list li:last-child {
 
 ul#media-list li:hover {
   background: #23262c;
+}
+
+.thumb {
+  width: 40px;
+  height: 40px;
+  border-radius: 4px;
+  object-fit: cover;
+  background: #2a2e35;
+  flex-shrink: 0;
+}
+
+#pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  color: #9aa0aa;
+  font-size: 0.9rem;
 }
