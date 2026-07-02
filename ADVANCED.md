@@ -273,16 +273,18 @@ certificate this project doesn't have. The warning is expected and
 harmless — the README's Troubleshooting section tells users what to
 do about it.
 
-**Honest caveat:** this whole pipeline (the spec file's hidden-imports
-list, the launcher's PATH/data-dir handling, the CI workflow) was
-written and reviewed without access to a real Windows machine — it's
-based on documented PyInstaller/uvicorn/zeroconf behavior, not a
-verified successful build. Treat the first build (a manual
-`workflow_dispatch` run, or a real tag push) as something to actually
-download and test on Windows before trusting it as a release artifact
-— don't assume it works just because CI goes green; a green build only
-means PyInstaller didn't error, not that the resulting exe runs
-correctly.
+**Verification status:** this whole pipeline (the spec file's
+hidden-imports list, the launcher's PATH/data-dir handling, the CI
+workflow) was written and reviewed without access to a real Windows
+machine — based on documented PyInstaller/uvicorn/zeroconf behavior,
+not hands-on testing. The `v0.1.1` release build did succeed in CI —
+PyInstaller completed without error and produced `parztream-windows.exe`
+— which confirms the spec/hidden-imports list are at least correct
+enough to build. That is **not** the same as confirming the exe
+actually launches and works on a real Windows machine — a green CI
+build only proves PyInstaller didn't error, not that the resulting exe
+runs correctly. Treat that as still unverified until someone actually
+downloads and runs it on Windows.
 
 ## Building the Linux AppImage
 
@@ -372,18 +374,21 @@ never needs GPL-only encoders. See
 [Building the Windows .exe](#building-the-windows-exe) for the full
 reasoning.
 
-**What's actually been verified vs. not:** unlike the Windows build,
-this one runs on the same OS family this was developed on, so the
-core of it *was* actually tested — the raw PyInstaller binary was
-built and run locally, confirmed to serve the full app correctly
-(setup wizard, static assets, icons) and to write its database/secret
-key to the correct persistent XDG folder. What was **not** verified,
-for lack of Docker in that environment: the `manylinux_2_28`
-containerized build step in CI, and the actual `appimagetool`
-wrapping/FUSE behavior of the final `.AppImage` file. Treat the first
-real CI build (manual `workflow_dispatch`, or a real tag push) as
-something to download and test before trusting it as a release
-artifact, same caveat as the Windows build.
+**Verification status: fully verified, unlike Windows/macOS.** The raw
+PyInstaller binary was built and run locally during development,
+confirmed to serve the full app correctly. The CI pipeline itself
+needed three real fixes before it worked (all found by actually
+running it, not by inspection): the original `manylinux_2_28` base
+image doesn't build Python with a shared library, which PyInstaller
+requires; the replacement `python:3.12-slim-bullseye` image is missing
+`binutils` (needed for `objdump`); and files written by the
+containerized build step come out root-owned on the host, which broke
+the later `appimagetool` step until that step's output directory was
+`chown`'d back to the runner user. After those fixes, the actual
+`v0.1.1` release asset — the real downloaded `.AppImage`, not just the
+raw binary — was run end-to-end and confirmed to correctly serve the
+setup wizard, static assets, and icons. This is the one build of the
+three with real evidence behind it, not just "CI went green."
 
 ## Building the macOS app
 
@@ -447,19 +452,23 @@ README's Troubleshooting section (Control-click → Open, or
 an Intel Mac cannot run this build at all. Revisit if Intel support
 ever becomes worth the doubled build matrix.
 
-**Zero verification, more so than the other two builds:** the Windows
-build was written without a Windows machine but reasoned about
-carefully; the Linux build's core was actually built and run locally.
-This macOS build has **no verification of any kind** — no macOS
-environment was available at all while writing it. The `BUNDLE()`
-Info.plist keys, the `parztream-wrapper.sh` osascript approach, the
-`create-dmg` invocation, and the CI workflow are all based on
-documented behavior, not a single successful run. Before trusting this
-as a release artifact, someone needs to actually build it (CI or
-locally on a Mac) and open the resulting `.app` on real Apple Silicon
-hardware — treat every part of it as unverified until that happens,
-and re-verify here if you touch the spec file, the wrapper script, or
-the workflow.
+**Verification status:** no macOS environment was available at all
+while writing this, so the `BUNDLE()` Info.plist keys, the
+`parztream-wrapper.sh` osascript approach, and the `create-dmg`
+invocation were all based on documented behavior only. The `v0.1.1`
+release build did succeed in CI on a real `macos-14` runner —
+PyInstaller, the wrapper-script swap, and `create-dmg` all completed
+without error and produced `parztream-macos-arm64.dmg` — which is
+real signal that the mechanics are basically sound (this exact
+pipeline failed on its first attempt for an unrelated reason — a
+missing `contents: write` permission on the release-attach step — and
+that got caught and fixed the same way). What CI success does **not**
+confirm: whether the `.dmg` actually mounts correctly, whether the
+`.app` actually launches past Gatekeeper as described, or whether the
+osascript wrapper actually opens a working Terminal window on real
+hardware — none of that runs during a CI build. Treat this as
+"builds successfully" rather than "works," until someone actually
+opens it on a real Apple Silicon Mac.
 
 ## Accessibility
 

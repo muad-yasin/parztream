@@ -503,16 +503,18 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   certificate), so Windows SmartScreen shows a warning on first run —
   expected, documented in the README's Troubleshooting section, not a
   bug to silently "fix" by suppressing the warning some other way.
-  **This entire pipeline — the spec file's hidden-imports list, the
-  launcher's PATH/data-dir handling, the GitHub Actions workflow —
-  was written without access to a real Windows machine.** It's based
-  on documented PyInstaller/uvicorn/zeroconf behavior, not a verified
-  successful build. A green CI run only means PyInstaller didn't
-  error, not that the resulting exe actually launches correctly on a
-  clean Windows machine — treat the first real build as something to
-  download and manually test on Windows before trusting it, and
-  re-verify here if you touch the spec file, the hidden-imports list,
-  or launcher.py's import-order-dependent env var setup.
+  **This entire pipeline was written without access to a real Windows
+  machine.** The `v0.1.1` release build did succeed in CI (PyInstaller
+  produced `parztream-windows.exe` with no errors), which confirms the
+  spec/hidden-imports list are at least correct enough to build — but
+  that's still not the same as confirming the exe actually launches
+  and works on a real Windows machine, which nothing in CI checks. The
+  first attempt at this build (the `v0.1` tag) failed outright on a
+  missing `contents: write` permission for the release-attach step —
+  fixed, but a reminder that "should work" and "did work" are
+  different claims here. Treat Windows as still unverified end-to-end,
+  and re-verify here if you touch the spec file, the hidden-imports
+  list, or launcher.py's import-order-dependent env var setup.
 - `packaging/linux/` — the Linux build (`parztream-linux-x86_64.AppImage`,
   the same "easiest way to get started" pitch as the Windows exe, for
   Linux users). Same architecture as `packaging/windows/`:
@@ -558,19 +560,23 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   the `.exe` doesn't have, documented in the README's Troubleshooting
   section (`libfuse2`, or `--appimage-extract-and-run`) rather than
   something to "fix" by bundling FUSE itself.
-  **Partially verified, unlike the Windows build**: unlike
-  `packaging/windows/`, this one was built and actually run in the
-  same environment it was developed in — the raw PyInstaller binary
-  (not wrapped in AppImage) was confirmed to build and correctly serve
-  the full app (setup wizard, static assets, icons) and write its
-  database/secret key to the right persistent XDG folder. What's
-  **not** verified, for lack of Docker in that environment: the
-  `manylinux_2_28` containerized build step in CI, and the actual
-  `appimagetool` wrapping/FUSE behavior of the final `.AppImage`.
-  Treat the first real CI build as something to actually download and
-  test on Linux before trusting it as a release artifact, and
-  re-verify here if you touch the spec file, `AppRun`, the `.desktop`
-  file, or the CI workflow.
+  **Fully verified, unlike Windows/macOS**: both the raw local
+  PyInstaller binary during development *and* the actual downloaded
+  `v0.1.1` release `.AppImage` were run for real and confirmed to
+  correctly serve the full app (setup wizard, static assets, icons)
+  and write its database/secret key to the right persistent XDG
+  folder. Getting the CI build working took three real, only-found-by-
+  running-it fixes, in order: `manylinux_2_28` doesn't build Python
+  with a shared library (PyInstaller requires one) →  switched to
+  `python:3.12-slim-bullseye`; that image is missing `binutils`
+  (PyInstaller needs `objdump`) → installed via `apt-get` in the same
+  step; files written by the containerized build step come out
+  root-owned on the host, which broke the later, non-containerized
+  `appimagetool` step with a permission error → `chown -R $(id
+  -u):$(id -g)` back to the runner user as the last thing inside the
+  container. If you touch the Docker base image here, expect a similar
+  class of surprise and actually run the workflow rather than trusting
+  it by inspection.
 - `packaging/macos/` — the macOS build (`parztream-macos-arm64.dmg`),
   same "easiest way to get started" pitch as Windows/Linux, for
   Apple Silicon Mac users specifically (Intel isn't built at all —
@@ -608,15 +614,22 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   oversight), so Gatekeeper blocks first launch; documented in the
   README's Troubleshooting section (Control-click → Open, or
   `xattr -cr`), not something to route around some other way.
-  **Zero verification, more so than Windows or Linux**: no macOS
-  environment was available at all while building this — not even the
-  partial local testing the Linux build got. Every part of it (the
+  **Builds successfully, but "builds" ≠ "works"**: no macOS
+  environment was available at all while writing this, so the
   `BUNDLE()` Info.plist keys, the wrapper script's `osascript` syntax,
-  the `create-dmg` invocation, the whole CI workflow) is based on
-  documented behavior only. Don't treat this as working until someone
-  actually builds and runs it on real Apple Silicon hardware, and
-  re-verify here if you touch the spec file, the wrapper script, or
-  the workflow.
+  and the `create-dmg` invocation were all based on documented
+  behavior only. The `v0.1.1` release build did succeed on a real
+  `macos-14` CI runner — PyInstaller, the wrapper-script swap, and
+  `create-dmg` all completed without error, producing an actual
+  `parztream-macos-arm64.dmg` (this same pipeline's first attempt
+  failed for an unrelated reason — a missing `contents: write`
+  permission — caught and fixed the same way as Windows/Linux). CI
+  success here only proves the build mechanics are sound; it doesn't
+  run the `.dmg`, open the `.app`, or exercise Gatekeeper/the osascript
+  wrapper — none of that happens in a headless CI job. Don't treat
+  this as working until someone actually opens it on real Apple
+  Silicon hardware, and re-verify here if you touch the spec file, the
+  wrapper script, or the workflow.
 
 Test isolation relies on a quirk worth knowing: `config.py` reads env
 vars into module-level constants at import time, and `db.py`/
