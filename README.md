@@ -25,7 +25,9 @@ your files anywhere.
 - TV episodes grouped by show and season
 - Subtitle support (`.srt` / `.vtt`)
 - Fast search across your whole library
-- Works well on phones: installable as an app, full-screen video
+- Works well on phones: add it to your home screen for a real app
+  icon and full-screen video (not an app-store app — just a browser
+  feature called a "PWA")
 - Optional password protection
 - Find the server by name on your network — no IP address to remember
 
