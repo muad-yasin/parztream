@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from .auth import BasicAuthMiddleware
 from .config import AUTH_PASSWORD
 from .db import init_db
-from .routers import library, stream
+from .routers import library, setup, stream
 
 logger = logging.getLogger("parztream")
 
@@ -28,6 +28,7 @@ app.add_middleware(BasicAuthMiddleware)
 
 app.include_router(library.router)
 app.include_router(stream.router)
+app.include_router(setup.router)
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

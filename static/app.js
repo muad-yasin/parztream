@@ -209,4 +209,15 @@ scanBtn.addEventListener("click", async () => {
   scanBtn.textContent = status.status === "error" ? "Scan failed — retry" : "Scan library";
 });
 
-loadShowList().then(loadLibrary);
+async function init() {
+  const res = await fetch("/api/setup/status");
+  const status = await res.json();
+  if (!status.configured) {
+    window.location.href = "/setup.html";
+    return;
+  }
+  await loadShowList();
+  await loadLibrary();
+}
+
+init();

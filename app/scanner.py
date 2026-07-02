@@ -8,7 +8,8 @@ from pathlib import Path
 
 from mutagen import File as MutagenFile
 
-from .config import AUDIO_EXTENSIONS, MEDIA_DIRS, VIDEO_EXTENSIONS
+from . import settings
+from .config import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS
 from .db import get_connection
 
 _scan_lock = threading.Lock()
@@ -45,7 +46,7 @@ def run_claimed_scan():
 def scan_media_dirs():
     found_paths = set()
     with get_connection() as conn:
-        for media_dir in MEDIA_DIRS:
+        for media_dir in settings.get_media_dirs():
             if not media_dir.is_dir():
                 continue
             # followlinks=False: don't descend into symlinked subdirectories,

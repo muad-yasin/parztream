@@ -28,16 +28,27 @@ files on the server through the streaming/download endpoints.
 ## Running
 
 ```bash
-export PARZTREAM_MEDIA_DIRS=/path/to/music:/path/to/videos   # ; separated on Windows
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Open `http://<host>:8000/` from any device on the LAN. Click
-"Scan library" to (re)index the configured folders — scanning runs
-in the background, so the UI stays responsive while it works. The
-library list shows thumbnails for every item — embedded cover art for
-audio (mp3/FLAC/m4a/m4b), an extracted video frame for video, both
-generated the first time they're requested and cached after — is
+Open `http://<host>:8000/` from any device on the LAN. If no media
+folders are configured yet, you'll land on a setup page with a
+built-in folder browser — no need to know a folder's exact path or
+touch a config file. Pick one or more folders and save; parztream
+scans them right away and remembers the choice (in its database, not
+just for this run), so it survives restarts without needing
+`PARZTREAM_MEDIA_DIRS` set at all. Revisit folder selection any time
+via the "Settings" link in the header. `PARZTREAM_MEDIA_DIRS` still
+works exactly as before if you'd rather configure it that way (e.g.
+for the systemd/service setups below) — it's used as the starting
+default, and anything saved through the setup page takes precedence
+over it.
+
+Click "Scan library" to re-index the configured folders — scanning
+runs in the background, so the UI stays responsive while it works.
+The library list shows thumbnails for every item — embedded cover art
+for audio (mp3/FLAC/m4a/m4b), an extracted video frame for video,
+both generated the first time they're requested and cached after — is
 searchable (title/artist/album/show name, case-insensitive substring
 match), and is paginated 50 items at a time.
 
@@ -85,7 +96,10 @@ playback specifically, not unplayable everywhere.
 Set via environment variables:
 
 - `PARZTREAM_MEDIA_DIRS` — folders to scan, separated by `os.pathsep`
-  (`:` on Linux/macOS, `;` on Windows).
+  (`:` on Linux/macOS, `;` on Windows). Only used as the *default*
+  before anything's been configured through the setup page — once
+  folders are saved there (stored in the database), that takes over
+  and this env var is ignored, even if it's still set.
 - `PARZTREAM_DB_PATH` — SQLite file location (defaults to
   `parztream.db` in the project root).
 - `PARZTREAM_PASSWORD` — if set, the whole app (UI, API, streaming)

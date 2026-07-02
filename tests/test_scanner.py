@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-from app import scanner
+from app import scanner, settings
 from app.db import get_connection
 
 requires_ffmpeg = pytest.mark.skipif(
@@ -85,7 +85,7 @@ def test_scan_removes_rows_for_files_deleted_from_disk(make_file, monkeypatch):
 
 
 def test_ignores_configured_dir_that_does_not_exist(monkeypatch, tmp_path):
-    monkeypatch.setattr(scanner, "MEDIA_DIRS", [tmp_path / "does-not-exist"])
+    monkeypatch.setattr(settings, "get_media_dirs", lambda: [tmp_path / "does-not-exist"])
     scanner.scan_media_dirs()  # should not raise
     assert _rows() == []
 

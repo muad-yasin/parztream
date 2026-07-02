@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Set up parztream</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>parztream setup</h1>
+  </header>
+
+  <main class="setup-main">
+    <p class="setup-intro">
+      Choose one or more folders that contain your music and videos.
+      parztream will scan them and keep the library up to date.
+    </p>
+
+    <div class="browser">
+      <div class="browser-path">
+        <button id="up-btn" title="Up one level">⬆</button>
+        <span id="current-path"></span>
+      </div>
+      <ul id="folder-list"></ul>
+      <button id="add-folder-btn">Add this folder</button>
+    </div>
+
+    <div class="selected-folders">
+      <h2>Selected folders</h2>
+      <ul id="selected-list"></ul>
+      <p id="no-folders-message" class="setup-hint">No folders selected yet.</p>
+    </div>
+
+    <button id="save-btn" disabled>Save &amp; start scanning</button>
+    <p id="setup-error" class="setup-error"></p>
+  </main>
+
+  <script src="/setup.js"></script>
+</body>
+</html>

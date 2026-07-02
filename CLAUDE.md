@@ -19,8 +19,9 @@ step, no framework). Developed on Linux; must also run on Windows.
 python3 -m venv .venv && source .venv/bin/activate   # .venv\Scripts\activate on Windows
 pip install -r requirements.txt
 
-# Run the dev server (reload on change)
-export PARZTREAM_MEDIA_DIRS=/path/to/media   # : separated on Linux, ; on Windows
+# Run the dev server (reload on change) -- PARZTREAM_MEDIA_DIRS is now
+# optional; without it you land on /setup.html to pick folders via a
+# built-in browser instead, and the choice persists in the DB
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 # Tests
@@ -49,15 +50,29 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   knows it (many don't, e.g. `.m4b`); if not, register an override
   with `mimetypes.add_type()` right here too, otherwise streaming
   falls back to `application/octet-stream` and browsers won't play
-  it even though the file scans in fine.
+  it even though the file scans in fine. `MEDIA_DIRS` here is only
+  ever a *fallback default* now — see `app/settings.py`.
+- `app/settings.py` — mutable, DB-backed settings (currently just
+  `media_dirs`), for things a non-technical user configures through
+  the web UI (`/setup.html`) instead of environment variables.
+  `get_media_dirs()` reads the `settings` table, falling back to
+  `config.MEDIA_DIRS` if nothing's been saved there yet; `set_media_dirs()`
+  upserts it. This is a *live* lookup, not a module-level constant like
+  `config.MEDIA_DIRS` — a folder change through `/setup.html` takes
+  effect on the next scan without restarting the process. Anything
+  that needs the current media directories should call
+  `settings.get_media_dirs()`, never import `config.MEDIA_DIRS`
+  directly (that would silently ignore anything saved via setup).
 - `app/db.py` — raw `sqlite3` access via a `get_connection()`
-  context manager (opens, commits on success, always closes). One
-  table, `media`. No migrations system yet — schema changes mean
-  editing `SCHEMA` in this file (existing dev DBs need to be deleted
-  and rescanned).
-- `app/scanner.py` — walks `MEDIA_DIRS` via `os.walk(..., followlinks=False)`
-  (not `Path.rglob`, deliberately: a plain glob would follow symlinks),
-  and explicitly skips any entry where `path.is_symlink()` is true.
+  context manager (opens, commits on success, always closes). Two
+  tables: `media` and `settings` (a plain key/value store, currently
+  just holding `media_dirs` as a JSON-encoded list). No migrations
+  system yet — schema changes mean editing `SCHEMA` in this file
+  (existing dev DBs need to be deleted and rescanned).
+- `app/scanner.py` — walks `settings.get_media_dirs()` via
+  `os.walk(..., followlinks=False)` (not `Path.rglob`, deliberately: a
+  plain glob would follow symlinks), and explicitly skips any entry
+  where `path.is_symlink()` is true.
   Confirmed live before this existed: a symlink named e.g. `song.mp3`
   inside a scanned folder, pointing anywhere on disk, got scanned and
   fully served through the streaming endpoint regardless of what it
@@ -114,6 +129,23 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   finds anything. `GET /api/library/{id}/subtitles` serves
   `app/subtitles.py`'s WebVTT conversion, 404s for audio or if there's
   no sidecar file.
+- `app/routers/setup.py` — `GET /api/setup/status` (`{"configured": bool}`,
+  backed by `settings.is_configured()`), `GET /api/setup/browse?path=`
+  (lists subdirectories of `path`, or a platform-appropriate default —
+  `Path.home()` on POSIX, first available drive letter on Windows —
+  when `path` is omitted; hidden dirs and non-directories are filtered
+  out), and `POST /api/setup` (body: `{"media_dirs": [...]}, validates
+  each path is a real directory, calls `settings.set_media_dirs()`,
+  then triggers a background scan the same way `POST /api/scan` does).
+  No path restrictions on what `/browse` can list beyond "must be a
+  real directory" — once past auth (if configured), the setup UI can
+  see the whole filesystem, same trust boundary as the rest of the
+  app; this is a deliberate choice, not an oversight, consistent with
+  the "you're the admin" model everywhere else here. Worth remembering:
+  `/setup.html`/`/api/setup/*` are reachable with **no auth at all**
+  during the specific window where `PARZTREAM_PASSWORD` isn't set yet
+  and folders haven't been configured — that's the existing
+  no-auth-by-default behavior extended to setup, not a new gap.
 - `app/artwork.py` — two independent functions, kept separate rather
   than unified because their cost profiles are opposite. `get_cover_art`
   pulls embedded art out of audio files (ID3 `APIC` for mp3, `covr`
@@ -241,7 +273,20 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   here — a 404 on a `<track src>` just gets ignored by the browser,
   unlike a `<video src>` 415). Also polls `/api/scan/status` after
   triggering a scan (the trigger endpoint returns immediately, it
-  doesn't wait for the scan to finish).
+  doesn't wait for the scan to finish). `init()` checks
+  `GET /api/setup/status` before anything else and redirects to
+  `/setup.html` if unconfigured — every other function in this file
+  assumes at least one media dir already exists, so don't reorder this
+  check after the rest of startup.
+  `setup.html`/`setup.js` are a self-contained folder-browser page
+  (separate from `index.html`, not a view inside the main SPA-ish
+  page) — click a name in `#folder-list` to descend, "Add this folder"
+  to select the *currently browsed* path (these are different actions:
+  clicking navigates, the button selects), remove selected folders
+  individually, "Save & start scanning" `POST`s to `/api/setup` and
+  redirects to `/` on success. Deliberately no path-typing fallback —
+  browse-only, since the whole point is not requiring the user to know
+  an exact filesystem path.
 - `deploy/` — templates for running as a persistent background
   service (systemd unit + env-file template for Linux, a batch
   script + env-file template for Windows), documented in the

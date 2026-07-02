@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from app import artwork, auth, cache, db, main, scanner, transcode
+from app import artwork, auth, cache, config, db, main, scanner, transcode
 
 
 @pytest.fixture
@@ -25,7 +25,11 @@ def make_file(media_dir):
 def isolated_app_state(tmp_path, media_dir, monkeypatch):
     """Point config at per-test tmp paths and reset the scanner's global
     lock/status so tests can't see state left over by a previous test."""
-    monkeypatch.setattr(scanner, "MEDIA_DIRS", [media_dir])
+    # settings.get_media_dirs() falls back to config.MEDIA_DIRS when no
+    # settings row exists yet (true for every test, since each gets a fresh
+    # tmp DB) -- patching the fallback here, not settings.get_media_dirs
+    # itself, keeps the real settings.py logic exercised by the whole suite.
+    monkeypatch.setattr(config, "MEDIA_DIRS", [media_dir])
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr(auth, "AUTH_PASSWORD", None)
     monkeypatch.setattr(auth, "AUTH_USERNAME", "parztream")
