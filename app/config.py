@@ -1,3 +1,4 @@
+import mimetypes
 import os
 from pathlib import Path
 
@@ -9,8 +10,14 @@ MEDIA_DIRS = [
 
 DB_PATH = Path(os.environ.get("PARZTREAM_DB_PATH", BASE_DIR / "parztream.db"))
 
-AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac"}
+AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".m4b", ".ogg", ".wav", ".aac"}
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm"}
+
+# .m4b (audiobook chapters) uses the same MPEG-4 container as .m4a, but
+# Python's mimetypes registry doesn't know the extension, so without this
+# streaming would fall back to application/octet-stream and browsers
+# wouldn't know how to play it.
+mimetypes.add_type("audio/mp4", ".m4b")
 
 AUTH_USERNAME = os.environ.get("PARZTREAM_USERNAME", "parztream")
 AUTH_PASSWORD = os.environ.get("PARZTREAM_PASSWORD")

@@ -41,7 +41,13 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
 
 - `app/config.py` — all configuration is read from environment
   variables here (`PARZTREAM_MEDIA_DIRS`, `PARZTREAM_DB_PATH`).
-  Nothing else in the app should read `os.environ` directly.
+  Nothing else in the app should read `os.environ` directly. Also
+  owns `AUDIO_EXTENSIONS`/`VIDEO_EXTENSIONS` — if you add a new
+  extension here, check whether `mimetypes.guess_type()` actually
+  knows it (many don't, e.g. `.m4b`); if not, register an override
+  with `mimetypes.add_type()` right here too, otherwise streaming
+  falls back to `application/octet-stream` and browsers won't play
+  it even though the file scans in fine.
 - `app/db.py` — raw `sqlite3` access via a `get_connection()`
   context manager (opens, commits on success, always closes). One
   table, `media`. No migrations system yet — schema changes mean

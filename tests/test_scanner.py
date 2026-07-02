@@ -21,14 +21,16 @@ def test_classifies_by_extension_and_ignores_unknown_files(make_file, monkeypatc
         scanner, "_extract_metadata", lambda path, media_type: (path.stem, "Artist", "Album", 42.0)
     )
     make_file("song.mp3")
+    make_file("audiobook.m4b")
     make_file("clip.mkv")
     make_file("notes.txt")
 
     scanner.scan_media_dirs()
 
     rows = {r["path"].rsplit("/", 1)[-1]: r for r in _rows()}
-    assert set(rows) == {"song.mp3", "clip.mkv"}
+    assert set(rows) == {"song.mp3", "audiobook.m4b", "clip.mkv"}
     assert rows["song.mp3"]["media_type"] == "audio"
+    assert rows["audiobook.m4b"]["media_type"] == "audio"
     assert rows["clip.mkv"]["media_type"] == "video"
     assert rows["song.mp3"]["artist"] == "Artist"
     assert rows["song.mp3"]["duration"] == 42.0

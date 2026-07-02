@@ -32,6 +32,18 @@ def test_content_type_is_derived_from_file_extension(client, make_file):
     assert res.headers["content-type"] == "video/webm"
 
 
+def test_m4b_audiobook_content_type_is_playable_not_octet_stream(client, make_file):
+    # .m4b isn't in Python's mimetypes registry by default; config.py
+    # registers it as audio/mp4 (same container as .m4a) so browsers can
+    # actually play it instead of getting application/octet-stream.
+    f = make_file("book.m4b", b"z" * 10)
+    media_id = _insert_media(f, "audio")
+
+    res = client.get(f"/api/stream/{media_id}")
+
+    assert res.headers["content-type"] == "audio/mp4"
+
+
 def test_partial_range_returns_exact_byte_slice(client, make_file):
     content = bytes(range(256)) * 4
     f = make_file("song.mp3", content)
