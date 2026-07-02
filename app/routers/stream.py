@@ -1,3 +1,4 @@
+import mimetypes
 import re
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from ..db import get_connection
 router = APIRouter(prefix="/api", tags=["stream"])
 
 CHUNK_SIZE = 1024 * 1024
-RANGE_RE = re.compile(r"bytes=(\d+)-(\d*)")
+RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 
 
 @router.get("/stream/{media_id}")
@@ -24,7 +25,7 @@ def stream_media(media_id: int, request: Request):
         raise HTTPException(status_code=404, detail="File missing on disk")
 
     file_size = path.stat().st_size
-    content_type = "audio/mpeg" if row["media_type"] == "audio" else "video/mp4"
+    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
 
     range_header = request.headers.get("range")
     if range_header is None:
@@ -35,12 +36,29 @@ def stream_media(media_id: int, request: Request):
         )
 
     match = RANGE_RE.match(range_header)
-    if not match:
-        raise HTTPException(status_code=416, detail="Invalid range header")
+    if not match or not (match.group(1) or match.group(2)):
+        raise HTTPException(
+            status_code=416,
+            detail="Invalid range header",
+            headers={"Content-Range": f"bytes */{file_size}"},
+        )
 
-    start = int(match.group(1))
-    end = int(match.group(2)) if match.group(2) else file_size - 1
-    end = min(end, file_size - 1)
+    start_str, end_str = match.groups()
+    if start_str == "":
+        # Suffix range, e.g. "bytes=-500" meaning the last 500 bytes.
+        suffix_length = int(end_str)
+        start = max(file_size - suffix_length, 0)
+        end = file_size - 1
+    else:
+        start = int(start_str)
+        end = min(int(end_str), file_size - 1) if end_str else file_size - 1
+
+    if start >= file_size or start > end:
+        raise HTTPException(
+            status_code=416,
+            detail="Range not satisfiable",
+            headers={"Content-Range": f"bytes */{file_size}"},
+        )
 
     headers = {
         "Content-Range": f"bytes {start}-{end}/{file_size}",

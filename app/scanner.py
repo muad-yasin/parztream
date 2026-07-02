@@ -53,19 +53,30 @@ def _extract_metadata(path: Path, media_type: str):
     if media_type == "audio":
         try:
             audio = MutagenFile(path, easy=True)
-            if audio is not None:
-                if audio.tags:
-                    title = audio.tags.get("title", [title])[0]
-                    artist = audio.tags.get("artist", [None])[0]
-                    album = audio.tags.get("album", [None])[0]
+        except Exception:
+            audio = None
+        if audio is not None:
+            if audio.tags:
+                title = _first_tag(audio.tags, "title", title)
+                artist = _first_tag(audio.tags, "artist", artist)
+                album = _first_tag(audio.tags, "album", album)
+            try:
                 if audio.info:
                     duration = audio.info.length
-        except Exception:
-            pass
+            except Exception:
+                pass
     else:
         duration = _probe_duration(path)
 
     return title, artist, album, duration
+
+
+def _first_tag(tags, key: str, default):
+    try:
+        values = tags.get(key)
+        return values[0] if values else default
+    except Exception:
+        return default
 
 
 def _probe_duration(path: Path):
