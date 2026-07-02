@@ -16,11 +16,27 @@ def _rows():
         return [dict(r) for r in conn.execute("SELECT * FROM media")]
 
 
+def _metadata(**overrides):
+    base = {
+        "title": "Untitled",
+        "artist": None,
+        "album": None,
+        "duration": None,
+        "video_codec": None,
+        "audio_codec": None,
+        "show_name": None,
+        "season_number": None,
+        "episode_number": None,
+    }
+    base.update(overrides)
+    return base
+
+
 def test_classifies_by_extension_and_ignores_unknown_files(make_file, monkeypatch):
     monkeypatch.setattr(
         scanner,
         "_extract_metadata",
-        lambda path, media_type: (path.stem, "Artist", "Album", 42.0, None, None),
+        lambda path, media_type: _metadata(title=path.stem, artist="Artist", album="Album", duration=42.0),
     )
     make_file("song.mp3")
     make_file("audiobook.m4b")
@@ -43,7 +59,7 @@ def test_rescanning_updates_existing_row_instead_of_duplicating(make_file, monke
 
     def fake_extract(path, media_type):
         calls["n"] += 1
-        return (f"Title {calls['n']}", None, None, None, None, None)
+        return _metadata(title=f"Title {calls['n']}")
 
     monkeypatch.setattr(scanner, "_extract_metadata", fake_extract)
     make_file("song.mp3")
@@ -57,7 +73,7 @@ def test_rescanning_updates_existing_row_instead_of_duplicating(make_file, monke
 
 
 def test_scan_removes_rows_for_files_deleted_from_disk(make_file, monkeypatch):
-    monkeypatch.setattr(scanner, "_extract_metadata", lambda p, t: (p.stem, None, None, None, None, None))
+    monkeypatch.setattr(scanner, "_extract_metadata", lambda p, t: _metadata(title=p.stem))
     f = make_file("song.mp3")
     scanner.scan_media_dirs()
     assert len(_rows()) == 1
@@ -79,6 +95,37 @@ def test_first_tag_falls_back_on_missing_or_malformed_values():
     assert scanner._first_tag({}, "title", "fallback") == "fallback"
     assert scanner._first_tag({"title": []}, "title", "fallback") == "fallback"
     assert scanner._first_tag(None, "title", "fallback") == "fallback"
+
+
+@pytest.mark.parametrize(
+    "stem,expected",
+    [
+        ("The Chosen S01E01", ("The Chosen", 1, 1)),
+        ("The.Chosen.S01E03.1080p", ("The Chosen", 1, 3)),
+        ("the_chosen_s01e04", ("the chosen", 1, 4)),
+        ("Show Name - S1E5", ("Show Name", 1, 5)),
+        ("Some Movie (2020)", (None, None, None)),
+        ("random_video_clip", (None, None, None)),
+    ],
+)
+def test_parse_show_episode(stem, expected):
+    assert scanner._parse_show_episode(stem) == expected
+
+
+def test_scan_populates_show_fields_for_episode_style_filenames(make_file, monkeypatch):
+    monkeypatch.setattr(
+        scanner, "_probe_video_info", lambda path: (None, "h264", "aac")
+    )
+    make_file("The Chosen S01E02.mp4")
+    make_file("random_clip.mp4")
+
+    scanner.scan_media_dirs()
+
+    rows = {r["path"].rsplit("/", 1)[-1]: r for r in _rows()}
+    assert rows["The Chosen S01E02.mp4"]["show_name"] == "The Chosen"
+    assert rows["The Chosen S01E02.mp4"]["season_number"] == 1
+    assert rows["The Chosen S01E02.mp4"]["episode_number"] == 2
+    assert rows["random_clip.mp4"]["show_name"] is None
 
 
 @requires_ffmpeg

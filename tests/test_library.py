@@ -2,11 +2,15 @@ from app import scanner
 from app.db import get_connection
 
 
-def _insert_media(path, media_type="audio"):
+def _insert_media(path, media_type="audio", show_name=None, season_number=None, episode_number=None):
     with get_connection() as conn:
         cur = conn.execute(
-            "INSERT INTO media (path, media_type, title, size_bytes) VALUES (?, ?, ?, ?)",
-            (str(path), media_type, path.stem, path.stat().st_size),
+            """
+            INSERT INTO media
+                (path, media_type, title, size_bytes, show_name, season_number, episode_number)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (str(path), media_type, path.stem, path.stat().st_size, show_name, season_number, episode_number),
         )
         return cur.lastrowid
 
@@ -51,6 +55,32 @@ def test_list_media_limit_is_clamped_to_a_sane_range(client):
 
     too_small = client.get("/api/library", params={"limit": 0}).json()
     assert too_small["limit"] == 1
+
+
+def test_list_shows_groups_by_show_name_with_episode_counts(client, make_file):
+    _insert_media(make_file("chosen1.mp4"), "video", show_name="The Chosen", season_number=1, episode_number=1)
+    _insert_media(make_file("chosen2.mp4"), "video", show_name="The Chosen", season_number=1, episode_number=2)
+    _insert_media(make_file("other.mp4"), "video", show_name="Other Show", season_number=1, episode_number=1)
+    _insert_media(make_file("movie.mp4"), "video")  # no show_name -- shouldn't appear
+
+    res = client.get("/api/shows")
+
+    assert res.status_code == 200
+    shows = {s["show_name"]: s["episode_count"] for s in res.json()}
+    assert shows == {"The Chosen": 2, "Other Show": 1}
+
+
+def test_list_media_filters_by_show_name_ordered_by_episode(client, make_file):
+    _insert_media(make_file("c3.mp4"), "video", show_name="The Chosen", season_number=1, episode_number=3)
+    _insert_media(make_file("c1.mp4"), "video", show_name="The Chosen", season_number=1, episode_number=1)
+    _insert_media(make_file("c2.mp4"), "video", show_name="The Chosen", season_number=1, episode_number=2)
+    _insert_media(make_file("other.mp4"), "video", show_name="Other Show", season_number=1, episode_number=1)
+
+    res = client.get("/api/library", params={"show_name": "The Chosen"})
+
+    body = res.json()
+    assert body["total"] == 3
+    assert [i["episode_number"] for i in body["items"]] == [1, 2, 3]
 
 
 def test_get_single_media_item(client, make_file):

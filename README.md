@@ -30,6 +30,16 @@ in the background, so the UI stays responsive while it works. The
 library list shows embedded cover art where available (mp3/FLAC/
 m4a/m4b) and is paginated 50 items at a time.
 
+### TV show grouping
+
+Video files named like `Show Name S01E02...` (dots/underscores/spaces
+all work, e.g. `The.Chosen.S01E02.1080p.mp4`) are automatically
+recognized as episodes: a "shows" dropdown lets you browse by show,
+listing episodes in season/episode order instead of alphabetically.
+Anything that doesn't match that pattern is just left as a regular,
+ungrouped video — there's no attempt to guess at other naming
+conventions (`1x02`, absolute numbering, etc.).
+
 ### Playback compatibility ("Direct Stream")
 
 Most files play directly with no processing. If a video's *container*

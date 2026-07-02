@@ -1,5 +1,6 @@
 const listEl = document.getElementById("media-list");
 const filterEl = document.getElementById("filter");
+const showSelectEl = document.getElementById("show-select");
 const scanBtn = document.getElementById("scan-btn");
 const playerContainer = document.getElementById("player-container");
 const pagerEl = document.getElementById("pager");
@@ -7,10 +8,32 @@ const pagerEl = document.getElementById("pager");
 const PAGE_SIZE = 50;
 let offset = 0;
 
+async function loadShowList() {
+  const selected = showSelectEl.value;
+  const res = await fetch("/api/shows");
+  const shows = await res.json();
+
+  showSelectEl.innerHTML = "";
+  const allOption = document.createElement("option");
+  allOption.value = "";
+  allOption.textContent = "All shows";
+  showSelectEl.appendChild(allOption);
+
+  for (const show of shows) {
+    const option = document.createElement("option");
+    option.value = show.show_name;
+    option.textContent = `${show.show_name} (${show.episode_count})`;
+    showSelectEl.appendChild(option);
+  }
+  showSelectEl.value = selected;
+}
+
 async function loadLibrary() {
   const type = filterEl.value;
+  const showName = showSelectEl.value;
   const params = new URLSearchParams({ limit: PAGE_SIZE, offset });
   if (type) params.set("media_type", type);
+  if (showName) params.set("show_name", showName);
 
   const res = await fetch(`/api/library?${params}`);
   const data = await res.json();
@@ -31,7 +54,9 @@ function renderList(items) {
     li.appendChild(img);
 
     const label = document.createElement("span");
-    label.textContent = item.artist ? `${item.title} — ${item.artist}` : (item.title || item.path);
+    const episodeTag = item.show_name ? `S${item.season_number}E${item.episode_number} — ` : "";
+    const title = item.artist ? `${item.title} — ${item.artist}` : (item.title || item.path);
+    label.textContent = episodeTag + title;
     li.appendChild(label);
 
     li.addEventListener("click", () => playMedia(item));
@@ -120,6 +145,11 @@ filterEl.addEventListener("change", () => {
   loadLibrary();
 });
 
+showSelectEl.addEventListener("change", () => {
+  offset = 0;
+  loadLibrary();
+});
+
 async function pollScanStatus() {
   while (true) {
     const res = await fetch("/api/scan/status");
@@ -142,9 +172,10 @@ scanBtn.addEventListener("click", async () => {
   }
   const status = await pollScanStatus();
   offset = 0;
+  await loadShowList();
   await loadLibrary();
   scanBtn.disabled = false;
   scanBtn.textContent = status.status === "error" ? "Scan failed — retry" : "Scan library";
 });
 
-loadLibrary();
+loadShowList().then(loadLibrary);

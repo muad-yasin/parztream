@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import threading
 from datetime import datetime, timezone
@@ -63,29 +64,39 @@ def scan_media_dirs():
 
 
 def _upsert_media(conn, path: Path, media_type: str):
-    title, artist, album, duration, video_codec, audio_codec = _extract_metadata(path, media_type)
-    size_bytes = path.stat().st_size
+    info = _extract_metadata(path, media_type)
+    info["size_bytes"] = path.stat().st_size
     conn.execute(
         """
         INSERT INTO media
-            (path, media_type, title, artist, album, duration, size_bytes, video_codec, audio_codec)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (path, media_type, title, artist, album, duration, size_bytes,
+             video_codec, audio_codec, show_name, season_number, episode_number)
+        VALUES
+            (:path, :media_type, :title, :artist, :album, :duration, :size_bytes,
+             :video_codec, :audio_codec, :show_name, :season_number, :episode_number)
         ON CONFLICT(path) DO UPDATE SET
             title=excluded.title, artist=excluded.artist, album=excluded.album,
             duration=excluded.duration, size_bytes=excluded.size_bytes,
-            video_codec=excluded.video_codec, audio_codec=excluded.audio_codec
+            video_codec=excluded.video_codec, audio_codec=excluded.audio_codec,
+            show_name=excluded.show_name, season_number=excluded.season_number,
+            episode_number=excluded.episode_number
         """,
-        (str(path), media_type, title, artist, album, duration, size_bytes, video_codec, audio_codec),
+        {"path": str(path), "media_type": media_type, **info},
     )
 
 
 def _extract_metadata(path: Path, media_type: str):
-    title = path.stem
-    artist = None
-    album = None
-    duration = None
-    video_codec = None
-    audio_codec = None
+    info = {
+        "title": path.stem,
+        "artist": None,
+        "album": None,
+        "duration": None,
+        "video_codec": None,
+        "audio_codec": None,
+        "show_name": None,
+        "season_number": None,
+        "episode_number": None,
+    }
 
     if media_type == "audio":
         try:
@@ -94,18 +105,19 @@ def _extract_metadata(path: Path, media_type: str):
             audio = None
         if audio is not None:
             if audio.tags:
-                title = _first_tag(audio.tags, "title", title)
-                artist = _first_tag(audio.tags, "artist", artist)
-                album = _first_tag(audio.tags, "album", album)
+                info["title"] = _first_tag(audio.tags, "title", info["title"])
+                info["artist"] = _first_tag(audio.tags, "artist", None)
+                info["album"] = _first_tag(audio.tags, "album", None)
             try:
                 if audio.info:
-                    duration = audio.info.length
+                    info["duration"] = audio.info.length
             except Exception:
                 pass
     else:
-        duration, video_codec, audio_codec = _probe_video_info(path)
+        info["duration"], info["video_codec"], info["audio_codec"] = _probe_video_info(path)
+        info["show_name"], info["season_number"], info["episode_number"] = _parse_show_episode(path.stem)
 
-    return title, artist, album, duration, video_codec, audio_codec
+    return info
 
 
 def _first_tag(tags, key: str, default):
@@ -114,6 +126,24 @@ def _first_tag(tags, key: str, default):
         return values[0] if values else default
     except Exception:
         return default
+
+
+# Matches the common "Show Name S01E02[...]" convention, with '.', '_', or
+# spaces as separators (e.g. "The.Chosen.S01E02", "the_chosen_s01e02").
+# Anything else (1x02, absolute numbering, no episode markers at all) isn't
+# recognized -- those files just stay ungrouped, same as before this
+# feature existed, rather than guessing wrong.
+_SHOW_EPISODE_RE = re.compile(r"^(?P<show>.+?)[\s._-]+[Ss](?P<season>\d{1,2})[Ee](?P<episode>\d{1,3})")
+
+
+def _parse_show_episode(stem: str):
+    match = _SHOW_EPISODE_RE.match(stem)
+    if not match:
+        return None, None, None
+    show_name = re.sub(r"[\s._-]+", " ", match.group("show")).strip()
+    if not show_name:
+        return None, None, None
+    return show_name, int(match.group("season")), int(match.group("episode"))
 
 
 def _probe_video_info(path: Path):

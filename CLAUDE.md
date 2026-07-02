@@ -60,10 +60,17 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   tags; a single `ffprobe -show_entries format=duration:stream=...`
   JSON call for video duration *and* the first video/audio stream's
   codec name, stored as `video_codec`/`audio_codec` — both degrade
-  gracefully to `None`/filename if ffprobe is unavailable), and
-  upserts into `media` by path. Also deletes DB rows for files no
-  longer found on disk. This is the only place file-metadata
-  extraction happens.
+  gracefully to `None`/filename if ffprobe is unavailable; a regex,
+  `_parse_show_episode`, against the filename stem for `show_name`/
+  `season_number`/`episode_number` — only recognizes the "Show Name
+  S01E02" convention, anything else stays ungrouped rather than
+  guessing), and upserts into `media` by path. Also deletes DB rows
+  for files no longer found on disk. This is the only place
+  file-metadata extraction happens. `_extract_metadata` returns a
+  dict, not a positional tuple — it kept growing fields (this is its
+  3rd extension) and a dict is far less fragile to extend/mock in
+  tests than a positional tuple; follow that pattern rather than
+  reverting to positional if you add another field.
   Scans run in the background (see below), coordinated by a
   module-level `threading.Lock` plus a `_scan_state` dict
   (`get_scan_status`/`start_scan`/`run_claimed_scan`) — `start_scan()`
@@ -78,9 +85,16 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   immediately) and `GET /api/scan/status` for the frontend to poll.
   `GET /api/library` is paginated — it returns
   `{items, total, limit, offset}`, not a bare array; `limit` is
-  clamped to `[1, MAX_PAGE_SIZE]`. `GET /api/library/{id}/art` serves
-  embedded cover art (extracted on-demand via `app/artwork.py`, not
-  cached anywhere), 404s if the file has none.
+  clamped to `[1, MAX_PAGE_SIZE]`. It also takes an optional
+  `show_name` filter, which switches ordering from alphabetical
+  `title` to `season_number, episode_number` — episode order only
+  makes sense once you've already filtered to one show. `GET
+  /api/shows` is a separate, deliberately *un*paginated endpoint
+  (grouped/aggregated via `GROUP BY show_name`, and the number of
+  distinct shows is inherently much smaller than the episode count —
+  pagination would be overkill there). `GET /api/library/{id}/art`
+  serves embedded cover art (extracted on-demand via `app/artwork.py`,
+  not cached anywhere), 404s if the file has none.
 - `app/artwork.py` — pulls embedded cover art out of audio files
   (ID3 `APIC` for mp3, `covr` for MP4-family containers, FLAC
   `pictures`) via `mutagen`, re-reading the file fresh on every
@@ -141,9 +155,12 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   behind it.
 - `static/` — plain JS, no bundler. `app.js` fetches `/api/library`
   (with `limit`/`offset`, tracked in a module-level `offset`
-  variable, reset to 0 on filter change or after a scan), renders a
-  clickable list with a lazy-loaded `<img src="/api/library/{id}/art">`
-  per row (hidden via `onerror` if 404). `playMedia` probes
+  variable, reset to 0 on filter change, show-select change, or after
+  a scan), renders a clickable list with a lazy-loaded
+  `<img src="/api/library/{id}/art">` per row (hidden via `onerror` if
+  404), prefixed with `S{season}E{episode}` when `show_name` is set.
+  The shows `<select>` is repopulated from `GET /api/shows` on load
+  and after each scan. `playMedia` probes
   `/api/stream/{id}` with a tiny `Range: bytes=0-1` request first —
   this both warms the transcode cache before real playback starts and
   lets a `415` (unsupported video codec) show a "download instead"
