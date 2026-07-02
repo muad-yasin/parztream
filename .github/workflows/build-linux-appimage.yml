@@ -47,6 +47,8 @@ jobs:
           docker run --rm -v "$PWD":/io -w /io python:3.12-slim-bullseye \
             /bin/bash -c "
               set -eu
+              apt-get update &&
+              apt-get install -y --no-install-recommends binutils &&
               pip install -r requirements-build.txt &&
               pyinstaller packaging/linux/parztream.spec --distpath dist --workpath build --noconfirm
             "

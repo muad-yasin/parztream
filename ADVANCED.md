@@ -336,7 +336,13 @@ What's specific to Linux/AppImage rather than shared with Windows:
   a hypothetical. The official `python:*-slim` images are built with
   `--enable-shared` and don't have this problem. If a future
   PyInstaller/Python bump needs a newer glibc baseline, move to a newer
-  Debian-based `python:*-slim` tag, not back to manylinux.
+  Debian-based `python:*-slim` tag, not back to manylinux. One more
+  gap the same live build surfaced: PyInstaller also needs `objdump`
+  (from `binutils`), which the `slim` image doesn't include either —
+  the workflow installs it via `apt-get` before running PyInstaller.
+  Between manylinux's missing shared library and slim's missing
+  `binutils`, neither "obvious" base image worked without a fix; don't
+  assume a third swap won't have its own gap too.
 - **FUSE**: running an AppImage normally needs FUSE, which several
   modern distros no longer ship by default — this is a real rough edge
   `.exe` doesn't have. README's Troubleshooting section covers both
