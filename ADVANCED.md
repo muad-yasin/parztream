@@ -1,0 +1,241 @@
+# Advanced usage
+
+This page covers everything that didn't fit in the beginner-friendly
+[`README.md`](README.md): network details, configuration options,
+running parztream as a background service, accessibility notes, and
+testing. It assumes you've already got parztream running via the main
+README.
+
+## Contents
+
+- [Finding parztream on your network](#finding-parztream-on-your-network)
+- [How playback compatibility ("Direct Stream") works](#how-playback-compatibility-direct-stream-works)
+- [Mobile/PWA details](#mobilepwa-details)
+- [How login sessions work](#how-login-sessions-work)
+- [Configuration reference](#configuration-reference)
+- [Running as a background service](#running-as-a-background-service)
+- [Accessibility](#accessibility)
+- [Testing](#testing)
+
+## Finding parztream on your network
+
+By default, other devices on the same network can reach parztream at
+`http://parztream.local:8000/`, thanks to an automatic network
+announcement (mDNS/Bonjour) — no setup needed, and it keeps working
+even if the server's IP address changes later.
+
+Support for `.local` names varies by platform:
+
+- **macOS, iOS, Linux** — works reliably out of the box.
+- **Windows** — inconsistent; some versions resolve `.local` names
+  fine, others need Apple's Bonjour component installed (it ships
+  with iTunes, or can be installed standalone).
+- **Android browsers** — the weakest link; Android supports mDNS at
+  the OS level, but browsers resolving `.local` names in the address
+  bar is unreliable across versions.
+
+To turn this announcement off (e.g. on a network where multicast
+traffic is filtered), set `PARZTREAM_MDNS_ENABLED=false`.
+
+A second, independent option: set the server machine's actual OS
+hostname to `parztream` (`sudo hostnamectl set-hostname parztream` on
+Linux; System Properties → Computer Name on Windows). Many home
+routers automatically register a device's DHCP hostname into their
+own DNS, so on networks where that's true, plain
+`http://parztream:8000/` (no `.local`) works everywhere, including the
+Windows/Android cases where mDNS is weakest. This depends on your
+router's firmware and isn't guaranteed, but costs nothing extra to
+also set up, and covers different networks than mDNS does.
+
+Neither option is a 100% guarantee on every network — the server's IP
+address always works too, as a reliable fallback. Two related
+environment variables: `PARZTREAM_MDNS_HOSTNAME` (defaults to
+`parztream`) to advertise a different name, and `PARZTREAM_PORT`
+(defaults to `8000`) which must be kept in sync with whatever
+`--port` you actually start uvicorn with.
+
+## How playback compatibility ("Direct Stream") works
+
+Most files just play. If a video's *container* or *audio track* would
+stop a browser from playing it (the most common real case: an MKV
+with ordinary H.264 video but AC3/DTS surround audio, which browsers
+can't decode), parztream transparently repackages it into an MP4 —
+copying the video as-is and only re-encoding the audio if needed —
+and caches the result so it only happens once per file. This needs
+`ffmpeg` on `PATH`.
+
+What this *doesn't* do: re-encode video. If the video codec itself
+isn't one a browser supports (e.g. HEVC), playback shows a clear
+"can't play in browser" message with a link to download the original
+file instead — the video quality/resolution never changes, and a
+genuinely incompatible video codec stays incompatible for in-browser
+playback specifically, not unplayable everywhere.
+
+## Mobile/PWA details
+
+- The header controls reflow onto their own rows below ~640px wide
+  instead of overflowing sideways.
+- Fullscreen-on-tap uses the standard Fullscreen API, falling back to
+  iOS Safari's own fullscreen video API where the standard one isn't
+  supported. It never blocks playback if fullscreen is denied.
+- "Add to Home Screen" uses a web app manifest (`display: standalone`)
+  so the browser's address bar is hidden, closer to a real app than a
+  bookmark. This is a "PWA" (Progressive Web App), not an app-store
+  app.
+
+None of the above has been verified on a real phone — no device was
+available while building this. It's implemented correctly against the
+relevant web platform APIs and reviewed carefully, but that's a
+different (weaker) claim than "tested." If something doesn't behave
+as described, this is the first place to look.
+
+## How login sessions work
+
+Setting `PARZTREAM_PASSWORD` (see [Configuration reference](#configuration-reference))
+makes the app require signing in through a login page before anything
+is accessible. Without it, anyone who can reach the server's address
+can browse and stream — fine on a fully trusted home network, not
+recommended otherwise.
+
+A successful login sets a signed session cookie good for 90 days, so
+you're not asked again on every visit; "Log out" in the header clears
+it. Sessions are self-contained signed cookies, not tracked
+server-side, so logging out only tells your *browser* to stop sending
+the cookie — a copied cookie value stays valid until it expires on
+its own. If you ever suspect a session leaked, set/rotate
+`PARZTREAM_SECRET_KEY` and restart — that invalidates every existing
+session at once, which changing `PARZTREAM_PASSWORD` alone does not
+do.
+
+## Configuration reference
+
+Everything below is optional — parztream runs with sensible defaults
+and a guided setup page. Set these as environment variables if you
+want to configure it another way (e.g. for the service setups below).
+
+| Variable | What it does | Default |
+|---|---|---|
+| `PARZTREAM_MEDIA_DIRS` | Folders to scan, separated by `os.pathsep` (`:` on Linux/macOS, `;` on Windows). Only used as a starting default — once folders are saved through the setup page, that takes over. | none (setup page prompts) |
+| `PARZTREAM_DB_PATH` | SQLite database file location. | `parztream.db` |
+| `PARZTREAM_PASSWORD` | Enables login. See [How login sessions work](#how-login-sessions-work). | unset (no login) |
+| `PARZTREAM_USERNAME` | Login username. Only relevant if you're calling the login API directly — the login page itself only asks for a password. | `parztream` |
+| `PARZTREAM_SECRET_KEY` | Signs session cookies. If unset, a random key is generated on every restart, meaning everyone's logged out each time. Set a fixed value (`python3 -c "import secrets; print(secrets.token_hex(32))"`) to keep people logged in across restarts. | random per-restart |
+| `PARZTREAM_CACHE_DIR` | Where repackaged videos and video thumbnails are cached. | `cache/` |
+| `PARZTREAM_CACHE_MAX_BYTES` | Caps the cache folder's total size — oldest files are deleted once a new one pushes it over the limit. An evicted file just gets cheaply re-derived next time it's played. | unset (no limit) |
+| `PARZTREAM_MDNS_ENABLED` | Set to `false` to turn off the `parztream.local` network announcement. | `true` |
+| `PARZTREAM_MDNS_HOSTNAME` | Name advertised on the network. Change this if running more than one instance on the same LAN. | `parztream` |
+| `PARZTREAM_PORT` | Must match whatever `--port` you start uvicorn with — purely informational, only affects what's advertised on the network. | `8000` |
+
+**Security note:** symlinks are deliberately not followed when
+scanning. A symlink inside a scanned folder can point anywhere on
+disk regardless of its own filename, so following them would let
+anything writable into a scanned folder (a compromised download
+client, another OS account with folder access, plain
+misconfiguration) expose arbitrary files through the
+streaming/download endpoints. This is intentional and not something
+to "fix" by following symlinks.
+
+## Running as a background service
+
+The main README's install command runs parztream in the foreground —
+it stops when you close the terminal. Templates for running it as a
+persistent background service (auto-start, restart on crash) are in
+`deploy/`.
+
+### Linux (systemd)
+
+1. Put the project at a stable location (e.g. `/opt/parztream`),
+   including its `.venv`, and create a system user to run it as:
+   ```bash
+   sudo useradd --system --home-dir /opt/parztream --shell /usr/sbin/nologin parztream
+   sudo chown -R parztream:parztream /opt/parztream
+   ```
+2. Copy the env template and fill in real values — keep it outside
+   the project checkout since it holds a password:
+   ```bash
+   sudo mkdir -p /etc/parztream
+   sudo cp deploy/systemd/parztream.env.example /etc/parztream/parztream.env
+   sudo chmod 600 /etc/parztream/parztream.env
+   sudo $EDITOR /etc/parztream/parztream.env
+   ```
+3. Install and start the unit:
+   ```bash
+   sudo cp deploy/systemd/parztream.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now parztream
+   ```
+4. Check status/logs: `systemctl status parztream`,
+   `journalctl -u parztream -f`.
+
+Optional but recommended: set the machine's actual OS hostname so
+plain `http://parztream:8000/` has a chance of working too, on top of
+the `parztream.local` name the app advertises on its own:
+```bash
+sudo hostnamectl set-hostname parztream
+```
+
+Edit `User`/`WorkingDirectory`/`ExecStart` in the unit file first if
+your paths or username differ from the example. Don't add
+`--workers` to `ExecStart` — scan status/locking lives in one
+process's memory, so multiple worker processes would silently break
+the concurrent-scan-rejects-with-409 behavior.
+
+### Windows
+
+There's no systemd equivalent; `deploy/windows/run-parztream.bat`
+plus an env file (`deploy/windows/parztream.env.bat.example`, copy to
+`C:\ProgramData\parztream\parztream.env.bat` and fill in real values)
+gets you a runnable script. To make it persistent, either:
+
+- **Task Scheduler** — create a task that runs `run-parztream.bat` at
+  log-on/startup. Simplest, but it runs as a visible background
+  process tied to a login session, not a true Windows service.
+- **[NSSM](https://nssm.cc/)** — wraps the batch script as an actual
+  Windows service with restart-on-failure, closer to the systemd
+  setup above.
+
+Optional but recommended, same reasoning as the Linux step above: set
+the machine's actual computer name to `parztream` (System Properties
+→ Computer Name → Change), so plain `http://parztream:8000/` has a
+chance of working too.
+
+These Windows steps are untested — they're written from documented
+behavior, not verified on an actual Windows machine.
+
+## Accessibility
+
+- Every media/folder row is a real button, reachable and activatable
+  with just a keyboard (Tab + Enter/Space).
+- A "Skip to content" link (visible on keyboard focus) lets keyboard
+  users bypass the header controls and jump straight to the library.
+- Search, filter, and login fields have real (if visually hidden)
+  labels — placeholder text alone isn't a substitute for screen
+  reader users.
+- Scan progress, search result counts, and playback state changes are
+  announced to screen readers via a live region.
+- Text/background color contrast throughout meets WCAG AA (verified
+  by calculating actual contrast ratios for every color pair, not
+  eyeballed).
+
+**Known gaps:** touch targets meet WCAG 2.2's AA minimum (24×24px)
+but not the stricter AAA guideline (44×44px) — fixing that properly
+needs a broader spacing/layout pass with real-device testing, which
+wasn't available while building this. None of the above was verified
+with a real screen reader or an automated tool like axe-core either
+(no browser automation was available in the environment this was
+built in) — it's built correctly per the relevant WCAG success
+criteria and carefully reviewed, not screen-reader-tested.
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Tests run against isolated temporary directories/databases (see
+`tests/conftest.py`), never your real media folders or database. A
+couple of scanner tests that need real audio metadata are skipped
+automatically if `ffmpeg` isn't on `PATH`.
+
+For architecture notes and conventions, see `CLAUDE.md`.
