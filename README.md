@@ -64,9 +64,14 @@ Set via environment variables:
 - `PARZTREAM_CACHE_DIR` — where repackaged videos are cached (see
   "Playback compatibility" above; defaults to `cache/` in the project
   root). Grows roughly proportional to how much of your library needs
-  fixing up, since video is copied rather than re-encoded — nothing
-  prunes it automatically, so keep an eye on disk usage if space is
-  tight.
+  fixing up, since video is copied rather than re-encoded.
+- `PARZTREAM_CACHE_MAX_BYTES` — caps `PARZTREAM_CACHE_DIR`'s total
+  size; once a new file pushes it over this limit, the oldest cached
+  files are deleted to make room (the file just created is never
+  evicted, even if it alone exceeds the cap). Unset by default, i.e.
+  **no limit, no automatic pruning** — deleting cached files nobody
+  asked to be capped isn't a sane default. An evicted file isn't
+  lost, just re-derived (cheaply) the next time it's played.
 
 ## Running as a service
 

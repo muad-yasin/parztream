@@ -30,6 +30,7 @@ def isolated_app_state(tmp_path, media_dir, monkeypatch):
     monkeypatch.setattr(auth, "AUTH_PASSWORD", None)
     monkeypatch.setattr(auth, "AUTH_USERNAME", "parztream")
     monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(transcode, "CACHE_MAX_BYTES", None)
     db.init_db()
 
     if scanner._scan_lock.locked():

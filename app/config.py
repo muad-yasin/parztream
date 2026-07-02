@@ -12,8 +12,15 @@ DB_PATH = Path(os.environ.get("PARZTREAM_DB_PATH", BASE_DIR / "parztream.db"))
 
 # Where remuxed/audio-transcoded copies of videos get cached (see
 # app/transcode.py). Roughly the size of the originals that need it, since
-# video is copied, not re-encoded -- not pruned automatically.
+# video is copied, not re-encoded.
 CACHE_DIR = Path(os.environ.get("PARZTREAM_CACHE_DIR", BASE_DIR / "cache"))
+
+# Optional cap on CACHE_DIR's total size, in bytes -- oldest cached files are
+# deleted (after a new one is created) once it's exceeded. Unset/0 means no
+# limit, matching prior behavior, since deleting things nobody asked to be
+# capped by default would be a surprising default.
+_cache_max_bytes_raw = os.environ.get("PARZTREAM_CACHE_MAX_BYTES")
+CACHE_MAX_BYTES = int(_cache_max_bytes_raw) if _cache_max_bytes_raw else None
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".m4b", ".ogg", ".wav", ".aac"}
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm"}

@@ -41,7 +41,8 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
 
 - `app/config.py` — all configuration is read from environment
   variables here (`PARZTREAM_MEDIA_DIRS`, `PARZTREAM_DB_PATH`,
-  `PARZTREAM_CACHE_DIR` for `app/transcode.py`'s remux cache).
+  `PARZTREAM_CACHE_DIR`/`PARZTREAM_CACHE_MAX_BYTES` for
+  `app/transcode.py`'s remux cache and its optional size cap).
   Nothing else in the app should read `os.environ` directly. Also
   owns `AUDIO_EXTENSIONS`/`VIDEO_EXTENSIONS` — if you add a new
   extension here, check whether `mimetypes.guess_type()` actually
@@ -120,7 +121,14 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   one case that can take noticeably longer. The frontend's `playMedia`
   absorbs this by probing with a tiny ranged request before handing
   the URL to `<video>`/`<audio>`, so the cache is already warm by the
-  time real playback starts.
+  time real playback starts. Cache eviction (`_prune_cache`) runs
+  right after a new file is written, if `CACHE_MAX_BYTES` is set:
+  oldest-by-mtime files are deleted until back under budget. It
+  always excludes the file that was *just* created from eviction —
+  without that, a single cache miss on a small `CACHE_MAX_BYTES`
+  could delete the very file the current request is about to serve.
+  An evicted file isn't a loss, just a cache miss on next play (cheap
+  to re-derive, unlike the original scan metadata).
 - `app/auth.py` — `BasicAuthMiddleware`, a pure ASGI middleware (not
   `BaseHTTPMiddleware`, which buffers `StreamingResponse` bodies —
   that would hurt streaming large files). Gates the entire app,
