@@ -30,6 +30,23 @@ in the background, so the UI stays responsive while it works. The
 library list shows embedded cover art where available (mp3/FLAC/
 m4a/m4b) and is paginated 50 items at a time.
 
+### Playback compatibility ("Direct Stream")
+
+Most files play directly with no processing. If a video's *container*
+or *audio track* would stop a browser from playing it (the most
+common real case: an MKV with ordinary H.264 video but AC3/DTS
+surround audio, which browsers can't decode), parztream transparently
+repackages it into an MP4 — copying the video as-is and only
+re-encoding the audio if needed — and caches the result so it only
+happens once per file. This needs `ffmpeg` on `PATH`.
+
+What this *doesn't* do: re-encode video. If the video codec itself
+isn't one a browser supports (e.g. HEVC), playback returns a clear
+"can't play in browser" message with a link to download the original
+file instead, rather than a full transcode — the video quality/
+resolution never changes, and a genuinely incompatible video codec
+stays incompatible.
+
 ## Configuration
 
 Set via environment variables:
@@ -44,6 +61,12 @@ Set via environment variables:
   browse and stream. Recommended for anything beyond local testing.
 - `PARZTREAM_USERNAME` — Basic Auth username (defaults to
   `parztream`), only relevant when `PARZTREAM_PASSWORD` is set.
+- `PARZTREAM_CACHE_DIR` — where repackaged videos are cached (see
+  "Playback compatibility" above; defaults to `cache/` in the project
+  root). Grows roughly proportional to how much of your library needs
+  fixing up, since video is copied rather than re-encoded — nothing
+  prunes it automatically, so keep an eye on disk usage if space is
+  tight.
 
 ## Running as a service
 

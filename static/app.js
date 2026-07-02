@@ -67,13 +67,48 @@ function renderPager(total) {
   pagerEl.append(prevBtn, info, nextBtn);
 }
 
-function playMedia(item) {
+async function playMedia(item) {
+  const streamUrl = `/api/stream/${item.id}`;
+
   playerContainer.innerHTML = "";
+  const preparing = document.createElement("p");
+  preparing.className = "player-message";
+  preparing.textContent = "Preparing…";
+  playerContainer.appendChild(preparing);
+
+  // A tiny ranged probe first: if the file needs a container/audio fix
+  // (see app/transcode.py), this is also what triggers and waits for that
+  // one-time conversion, so by the time we hand the URL to <video>/<audio>
+  // it's already cached and plays instantly. It also lets us show a clear
+  // message instead of a silent player failure for codecs we can't fix.
+  let probe;
+  try {
+    probe = await fetch(streamUrl, { headers: { Range: "bytes=0-1" } });
+  } catch (err) {
+    preparing.textContent = "Couldn't reach the server.";
+    return;
+  }
+
+  playerContainer.innerHTML = "";
+
+  if (probe.status === 415) {
+    const msg = document.createElement("p");
+    msg.className = "player-message";
+    msg.textContent = "This file's video format can't be played in the browser. ";
+    const link = document.createElement("a");
+    link.href = streamUrl;
+    link.textContent = "Download it instead";
+    link.download = "";
+    msg.appendChild(link);
+    playerContainer.appendChild(msg);
+    return;
+  }
+
   const tag = item.media_type === "audio" ? "audio" : "video";
   const el = document.createElement(tag);
   el.controls = true;
   el.autoplay = true;
-  el.src = `/api/stream/${item.id}`;
+  el.src = streamUrl;
   if (tag === "video") {
     el.style.maxWidth = "100%";
   }

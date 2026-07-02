@@ -40,7 +40,8 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
 ## Architecture
 
 - `app/config.py` — all configuration is read from environment
-  variables here (`PARZTREAM_MEDIA_DIRS`, `PARZTREAM_DB_PATH`).
+  variables here (`PARZTREAM_MEDIA_DIRS`, `PARZTREAM_DB_PATH`,
+  `PARZTREAM_CACHE_DIR` for `app/transcode.py`'s remux cache).
   Nothing else in the app should read `os.environ` directly. Also
   owns `AUDIO_EXTENSIONS`/`VIDEO_EXTENSIONS` — if you add a new
   extension here, check whether `mimetypes.guess_type()` actually
@@ -55,10 +56,13 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   and rescanned).
 - `app/scanner.py` — walks `MEDIA_DIRS`, classifies files as
   audio/video by extension, extracts metadata (`mutagen` for audio
-  tags, `ffprobe` subprocess for video duration — both degrade
-  gracefully to `None`/filename if unavailable), and upserts into
-  `media` by path. Also deletes DB rows for files no longer found on
-  disk. This is the only place file-metadata extraction happens.
+  tags; a single `ffprobe -show_entries format=duration:stream=...`
+  JSON call for video duration *and* the first video/audio stream's
+  codec name, stored as `video_codec`/`audio_codec` — both degrade
+  gracefully to `None`/filename if ffprobe is unavailable), and
+  upserts into `media` by path. Also deletes DB rows for files no
+  longer found on disk. This is the only place file-metadata
+  extraction happens.
   Scans run in the background (see below), coordinated by a
   module-level `threading.Lock` plus a `_scan_state` dict
   (`get_scan_status`/`start_scan`/`run_claimed_scan`) — `start_scan()`
@@ -84,15 +88,39 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   (would need decoding a frame via `ffmpeg`) aren't implemented;
   `get_cover_art` returns `None` immediately for `media_type ==
   "video"`.
-- `app/routers/stream.py` — serves file bytes with manual HTTP
-  Range header parsing/`206 Partial Content` support, including
-  suffix ranges (`bytes=-500`) and a proper `416` for out-of-bounds
-  requests. This is hand-rolled (not `FileResponse`) specifically so
-  seeking works in `<video>`/`<audio>` players. Any change here
-  should preserve Range support — without it, scrubbing/seeking
-  breaks. `Content-Type` is derived via `mimetypes.guess_type()` —
-  don't hardcode it, different containers need different MIME types
-  for the browser to play them at all.
+- `app/routers/stream.py` — calls `transcode.resolve_playable_path(row)`
+  to get the path to actually serve (original or cached remux; a
+  `UnsupportedVideoCodec` becomes a `415`), then serves file bytes
+  with manual HTTP Range header parsing/`206 Partial Content` support,
+  including suffix ranges (`bytes=-500`) and a proper `416` for
+  out-of-bounds requests. This is hand-rolled (not `FileResponse`)
+  specifically so seeking works in `<video>`/`<audio>` players — that
+  includes seeking within a remuxed file, since it's a real cached
+  file on disk, not a live stream. Any change here should preserve
+  Range support. `Content-Type` is derived via `mimetypes.guess_type()`
+  on whichever path actually gets served — don't hardcode it,
+  different containers need different MIME types for the browser to
+  play them at all.
+- `app/transcode.py` — `resolve_playable_path(row)` decides whether a
+  video's original file can be played directly (mp4/webm container +
+  h264/vp8/vp9/av1 video + aac/mp3/opus/vorbis audio, or no codec info
+  yet — see below), or needs a one-time `ffmpeg -c:v copy` remux
+  (only re-encoding audio, via `-c:a aac`, if the audio codec itself
+  is the problem — e.g. AC3/DTS) cached to `CACHE_DIR/{id}.mp4`. This
+  is deliberately *not* full transcoding: video is always copied, never
+  re-encoded, so a genuinely incompatible video codec (e.g. HEVC)
+  raises `UnsupportedVideoCodec` instead of silently failing or trying
+  to fake support. Audio files always direct-play (never routed
+  through this). If `video_codec` is `None` (ffprobe unavailable, or
+  the row predates this feature and hasn't been rescanned), it falls
+  back to direct play rather than guessing wrong. The remux runs
+  **synchronously in the request** on a cache miss — no background
+  job/polling like scanning has — since it's normally fast (stream
+  copy, not re-encode); an audio-only transcode of a long file is the
+  one case that can take noticeably longer. The frontend's `playMedia`
+  absorbs this by probing with a tiny ranged request before handing
+  the URL to `<video>`/`<audio>`, so the cache is already warm by the
+  time real playback starts.
 - `app/auth.py` — `BasicAuthMiddleware`, a pure ASGI middleware (not
   `BaseHTTPMiddleware`, which buffers `StreamingResponse` bodies —
   that would hurt streaming large files). Gates the entire app,
@@ -107,8 +135,12 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   (with `limit`/`offset`, tracked in a module-level `offset`
   variable, reset to 0 on filter change or after a scan), renders a
   clickable list with a lazy-loaded `<img src="/api/library/{id}/art">`
-  per row (hidden via `onerror` if 404), points an `<audio>`/
-  `<video>` element at `/api/stream/{id}` on click, and polls
+  per row (hidden via `onerror` if 404). `playMedia` probes
+  `/api/stream/{id}` with a tiny `Range: bytes=0-1` request first —
+  this both warms the transcode cache before real playback starts and
+  lets a `415` (unsupported video codec) show a "download instead"
+  message rather than a silent `<video>` failure — before pointing an
+  `<audio>`/`<video>` element at the same URL. Also polls
   `/api/scan/status` after triggering a scan (the trigger endpoint
   returns immediately, it doesn't wait for the scan to finish).
 - `deploy/` — templates for running as a persistent background
@@ -127,7 +159,8 @@ vars into module-level constants at import time, and `db.py`/
 DB_PATH`, etc.), so patching env vars after startup does nothing.
 `tests/conftest.py` instead monkeypatches the *consuming* module's
 attribute directly (e.g. `monkeypatch.setattr(db, "DB_PATH", ...)`,
-`monkeypatch.setattr(scanner, "MEDIA_DIRS", ...)`) — that works
+`monkeypatch.setattr(scanner, "MEDIA_DIRS", ...)`,
+`monkeypatch.setattr(transcode, "CACHE_DIR", ...)`) — that works
 because each function looks up the name in its own module's globals
 at call time. If you add a new config value, follow the same pattern
 rather than trying to override the environment mid-test.

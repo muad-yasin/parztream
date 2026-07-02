@@ -1,3 +1,4 @@
+import json
 import subprocess
 import threading
 from datetime import datetime, timezone
@@ -62,17 +63,19 @@ def scan_media_dirs():
 
 
 def _upsert_media(conn, path: Path, media_type: str):
-    title, artist, album, duration = _extract_metadata(path, media_type)
+    title, artist, album, duration, video_codec, audio_codec = _extract_metadata(path, media_type)
     size_bytes = path.stat().st_size
     conn.execute(
         """
-        INSERT INTO media (path, media_type, title, artist, album, duration, size_bytes)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO media
+            (path, media_type, title, artist, album, duration, size_bytes, video_codec, audio_codec)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(path) DO UPDATE SET
             title=excluded.title, artist=excluded.artist, album=excluded.album,
-            duration=excluded.duration, size_bytes=excluded.size_bytes
+            duration=excluded.duration, size_bytes=excluded.size_bytes,
+            video_codec=excluded.video_codec, audio_codec=excluded.audio_codec
         """,
-        (str(path), media_type, title, artist, album, duration, size_bytes),
+        (str(path), media_type, title, artist, album, duration, size_bytes, video_codec, audio_codec),
     )
 
 
@@ -81,6 +84,8 @@ def _extract_metadata(path: Path, media_type: str):
     artist = None
     album = None
     duration = None
+    video_codec = None
+    audio_codec = None
 
     if media_type == "audio":
         try:
@@ -98,9 +103,9 @@ def _extract_metadata(path: Path, media_type: str):
             except Exception:
                 pass
     else:
-        duration = _probe_duration(path)
+        duration, video_codec, audio_codec = _probe_video_info(path)
 
-    return title, artist, album, duration
+    return title, artist, album, duration, video_codec, audio_codec
 
 
 def _first_tag(tags, key: str, default):
@@ -111,18 +116,39 @@ def _first_tag(tags, key: str, default):
         return default
 
 
-def _probe_duration(path: Path):
+def _probe_video_info(path: Path):
+    """Return (duration, video_codec, audio_codec) via a single ffprobe call.
+    video_codec/audio_codec are the *first* video/audio stream's codec name
+    (e.g. "h264", "ac3"), used by app/transcode.py to decide whether a file
+    can be played directly in a browser."""
     try:
         result = subprocess.run(
             [
-                "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration:stream=codec_type,codec_name",
+                "-of", "json", str(path),
             ],
             capture_output=True, text=True, timeout=10,
         )
-        return float(result.stdout.strip())
-    except (FileNotFoundError, ValueError, subprocess.SubprocessError):
-        return None
+        data = json.loads(result.stdout)
+    except (FileNotFoundError, subprocess.SubprocessError, json.JSONDecodeError):
+        return None, None, None
+
+    duration = None
+    try:
+        duration = float(data["format"]["duration"])
+    except (KeyError, TypeError, ValueError):
+        pass
+
+    video_codec = None
+    audio_codec = None
+    for stream in data.get("streams", []):
+        if stream.get("codec_type") == "video" and video_codec is None:
+            video_codec = stream.get("codec_name")
+        elif stream.get("codec_type") == "audio" and audio_codec is None:
+            audio_codec = stream.get("codec_name")
+
+    return duration, video_codec, audio_codec
 
 
 def _remove_missing(conn, found_paths: set):

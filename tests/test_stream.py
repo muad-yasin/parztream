@@ -1,11 +1,23 @@
+import shutil
+import subprocess
+
+import pytest
+
 from app.db import get_connection
 
+requires_ffmpeg = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None, reason="ffmpeg not installed"
+)
 
-def _insert_media(path, media_type="audio"):
+
+def _insert_media(path, media_type="audio", video_codec=None, audio_codec=None):
     with get_connection() as conn:
         cur = conn.execute(
-            "INSERT INTO media (path, media_type, title, size_bytes) VALUES (?, ?, ?, ?)",
-            (str(path), media_type, path.stem, path.stat().st_size),
+            """
+            INSERT INTO media (path, media_type, title, size_bytes, video_codec, audio_codec)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (str(path), media_type, path.stem, path.stat().st_size, video_codec, audio_codec),
         )
         return cur.lastrowid
 
@@ -125,3 +137,47 @@ def test_missing_file_on_disk_returns_404(client, make_file):
     res = client.get(f"/api/stream/{media_id}")
 
     assert res.status_code == 404
+
+
+def test_unsupported_video_codec_returns_415(client, make_file):
+    f = make_file("clip.mkv", b"not real video data")
+    media_id = _insert_media(f, "video", video_codec="hevc", audio_codec="aac")
+
+    res = client.get(f"/api/stream/{media_id}")
+
+    assert res.status_code == 415
+
+
+def test_compatible_mp4_streams_directly_without_transcoding(client, make_file):
+    content = b"x" * 1000
+    f = make_file("clip.mp4", content)
+    media_id = _insert_media(f, "video", video_codec="h264", audio_codec="aac")
+
+    res = client.get(f"/api/stream/{media_id}")
+
+    assert res.status_code == 200
+    assert res.content == content
+
+
+@requires_ffmpeg
+def test_mkv_is_remuxed_and_served_as_playable_mp4(client, media_dir):
+    mkv_path = media_dir / "clip.mkv"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-c:v", "libx264", "-c:a", "aac", "-shortest",
+            str(mkv_path),
+        ],
+        check=True,
+    )
+    media_id = _insert_media(mkv_path, "video", video_codec="h264", audio_codec="aac")
+
+    res = client.get(f"/api/stream/{media_id}")
+
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "video/mp4"
+    # Seeking should also work on the remuxed output, same as any other file.
+    range_res = client.get(f"/api/stream/{media_id}", headers={"Range": "bytes=0-99"})
+    assert range_res.status_code == 206

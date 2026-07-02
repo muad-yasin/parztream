@@ -65,6 +65,17 @@ main {
   border-radius: 8px;
 }
 
+.player-message {
+  padding: 1rem;
+  border: 1px solid #2a2e35;
+  border-radius: 8px;
+  color: #9aa0aa;
+}
+
+.player-message a {
+  color: #7aa2f7;
+}
+
 ul#media-list {
   list-style: none;
   margin: 0;

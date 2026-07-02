@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from ..db import get_connection
+from ..transcode import UnsupportedVideoCodec, resolve_playable_path
 
 router = APIRouter(prefix="/api", tags=["stream"])
 
@@ -20,9 +21,17 @@ def stream_media(media_id: int, request: Request):
     if row is None:
         raise HTTPException(status_code=404, detail="Media not found")
 
-    path = Path(row["path"])
-    if not path.is_file():
+    original_path = Path(row["path"])
+    if not original_path.is_file():
         raise HTTPException(status_code=404, detail="File missing on disk")
+
+    try:
+        path = resolve_playable_path(row)
+    except UnsupportedVideoCodec as exc:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Video codec '{exc}' can't be played in a browser yet",
+        )
 
     file_size = path.stat().st_size
     content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"

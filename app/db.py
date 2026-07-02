@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS media (
     album TEXT,
     duration REAL,
     size_bytes INTEGER,
+    video_codec TEXT,
+    audio_codec TEXT,
     added_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_media_type ON media(media_type);

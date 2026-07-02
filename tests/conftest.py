@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from app import auth, db, main, scanner
+from app import auth, db, main, scanner, transcode
 
 
 @pytest.fixture
@@ -29,6 +29,7 @@ def isolated_app_state(tmp_path, media_dir, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr(auth, "AUTH_PASSWORD", None)
     monkeypatch.setattr(auth, "AUTH_USERNAME", "parztream")
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
     db.init_db()
 
     if scanner._scan_lock.locked():

@@ -18,7 +18,9 @@ def _rows():
 
 def test_classifies_by_extension_and_ignores_unknown_files(make_file, monkeypatch):
     monkeypatch.setattr(
-        scanner, "_extract_metadata", lambda path, media_type: (path.stem, "Artist", "Album", 42.0)
+        scanner,
+        "_extract_metadata",
+        lambda path, media_type: (path.stem, "Artist", "Album", 42.0, None, None),
     )
     make_file("song.mp3")
     make_file("audiobook.m4b")
@@ -41,7 +43,7 @@ def test_rescanning_updates_existing_row_instead_of_duplicating(make_file, monke
 
     def fake_extract(path, media_type):
         calls["n"] += 1
-        return (f"Title {calls['n']}", None, None, None)
+        return (f"Title {calls['n']}", None, None, None, None, None)
 
     monkeypatch.setattr(scanner, "_extract_metadata", fake_extract)
     make_file("song.mp3")
@@ -55,7 +57,7 @@ def test_rescanning_updates_existing_row_instead_of_duplicating(make_file, monke
 
 
 def test_scan_removes_rows_for_files_deleted_from_disk(make_file, monkeypatch):
-    monkeypatch.setattr(scanner, "_extract_metadata", lambda p, t: (p.stem, None, None, None))
+    monkeypatch.setattr(scanner, "_extract_metadata", lambda p, t: (p.stem, None, None, None, None, None))
     f = make_file("song.mp3")
     scanner.scan_media_dirs()
     assert len(_rows()) == 1
@@ -77,6 +79,29 @@ def test_first_tag_falls_back_on_missing_or_malformed_values():
     assert scanner._first_tag({}, "title", "fallback") == "fallback"
     assert scanner._first_tag({"title": []}, "title", "fallback") == "fallback"
     assert scanner._first_tag(None, "title", "fallback") == "fallback"
+
+
+@requires_ffmpeg
+def test_real_mp4_video_and_audio_codecs_are_recorded(media_dir):
+    mp4_path = media_dir / "clip.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-c:v", "libx264", "-c:a", "aac", "-shortest",
+            str(mp4_path),
+        ],
+        check=True,
+    )
+
+    scanner.scan_media_dirs()
+
+    row = _rows()[0]
+    assert row["media_type"] == "video"
+    assert row["video_codec"] == "h264"
+    assert row["audio_codec"] == "aac"
+    assert row["duration"] == pytest.approx(1.0, abs=0.2)
 
 
 @requires_ffmpeg
