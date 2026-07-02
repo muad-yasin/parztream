@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, Response
 from ..artwork import get_cover_art, get_video_thumbnail
 from ..db import get_connection
 from ..scanner import get_scan_status, run_claimed_scan, start_scan
+from ..subtitles import get_webvtt
 
 router = APIRouter(prefix="/api", tags=["library"])
 
@@ -98,6 +99,24 @@ def get_art(media_id: int):
     if thumb_path is None:
         raise HTTPException(status_code=404, detail="No thumbnail available")
     return FileResponse(thumb_path, media_type="image/jpeg")
+
+
+@router.get("/library/{media_id}/subtitles")
+def get_subtitles(media_id: int):
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
+    if row is None or row["media_type"] != "video":
+        raise HTTPException(status_code=404, detail="No subtitles available")
+
+    path = Path(row["path"])
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="File missing on disk")
+
+    vtt = get_webvtt(path)
+    if vtt is None:
+        raise HTTPException(status_code=404, detail="No subtitle file found")
+
+    return Response(content=vtt, media_type="text/vtt")
 
 
 @router.post("/scan")

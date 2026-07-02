@@ -183,6 +183,50 @@ def test_art_endpoint_404s_when_file_missing_on_disk(client, make_file):
     assert res.status_code == 404
 
 
+def test_subtitles_endpoint_404s_when_no_sidecar_file_exists(client, make_file):
+    f = make_file("clip.mp4", b"data")
+    media_id = _insert_media(f, media_type="video")
+
+    res = client.get(f"/api/library/{media_id}/subtitles")
+
+    assert res.status_code == 404
+
+
+def test_subtitles_endpoint_404s_for_audio(client, make_file):
+    f = make_file("song.mp3", b"data")
+    media_id = _insert_media(f, media_type="audio")
+    f.with_suffix(".srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+
+    res = client.get(f"/api/library/{media_id}/subtitles")
+
+    assert res.status_code == 404
+
+
+def test_subtitles_endpoint_serves_converted_srt_sidecar(client, make_file):
+    f = make_file("clip.mp4", b"data")
+    media_id = _insert_media(f, media_type="video")
+    f.with_suffix(".srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n")
+
+    res = client.get(f"/api/library/{media_id}/subtitles")
+
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/vtt")
+    assert res.text.startswith("WEBVTT")
+    assert "00:00:01.000 --> 00:00:02.000" in res.text
+
+
+def test_subtitles_endpoint_serves_vtt_sidecar_as_is(client, make_file):
+    f = make_file("clip.mp4", b"data")
+    media_id = _insert_media(f, media_type="video")
+    vtt_content = "WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\nHello\n"
+    f.with_suffix(".vtt").write_text(vtt_content)
+
+    res = client.get(f"/api/library/{media_id}/subtitles")
+
+    assert res.status_code == 200
+    assert res.text == vtt_content
+
+
 def test_concurrent_scan_trigger_is_rejected_by_the_lock():
     # A second trigger while one is in flight can't be reproduced through the
     # client (background tasks run to completion before the first request

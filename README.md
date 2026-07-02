@@ -42,6 +42,15 @@ Anything that doesn't match that pattern is just left as a regular,
 ungrouped video — there's no attempt to guess at other naming
 conventions (`1x02`, absolute numbering, etc.).
 
+### Subtitles
+
+If a video has a same-name `.srt` or `.vtt` file next to it (e.g.
+`Movie.mp4` + `Movie.srt`), it's picked up automatically and shown as
+a subtitle track during playback — `.srt` gets converted to WebVTT on
+the fly (browsers only support WebVTT natively), `.vtt` is served
+as-is. Only one subtitle file per video is supported — no multi-
+language track selection.
+
 ### Playback compatibility ("Direct Stream")
 
 Most files play directly with no processing. If a video's *container*

@@ -136,6 +136,14 @@ async function playMedia(item) {
   el.src = streamUrl;
   if (tag === "video") {
     el.style.maxWidth = "100%";
+    // A missing sidecar subtitle file just 404s -- the browser ignores
+    // that silently, no need to check first like the codec probe above.
+    const track = document.createElement("track");
+    track.kind = "subtitles";
+    track.src = `/api/library/${item.id}/subtitles`;
+    track.default = true;
+    track.label = "Subtitles";
+    el.appendChild(track);
   }
   playerContainer.appendChild(el);
 }

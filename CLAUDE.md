@@ -95,7 +95,9 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   pagination would be overkill there). `GET /api/library/{id}/art`
   serves art: `get_cover_art` (audio, uncached) or
   `get_video_thumbnail` (video, cached — see below), 404s if neither
-  finds anything.
+  finds anything. `GET /api/library/{id}/subtitles` serves
+  `app/subtitles.py`'s WebVTT conversion, 404s for audio or if there's
+  no sidecar file.
 - `app/artwork.py` — two independent functions, kept separate rather
   than unified because their cost profiles are opposite. `get_cover_art`
   pulls embedded art out of audio files (ID3 `APIC` for mp3, `covr`
@@ -112,6 +114,15 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   a second thing writing into `CACHE_DIR` — both now share one budget
   rather than each tracking their own. Same protect-the-just-created-
   file behavior as before extraction.
+- `app/subtitles.py` — looks for a same-stem `.vtt`/`.srt` sidecar
+  file next to the video (`find_subtitle_path`; `.vtt` preferred, no
+  conversion needed). `.srt` gets converted to WebVTT via a regex
+  scoped specifically to `HH:MM:SS,mmm` timestamps (`_srt_to_vtt`) —
+  deliberately narrow so it never touches a comma inside actual
+  dialogue text. No caching here, unlike thumbnails/remux: it's plain
+  text regex substitution, cheap enough to redo on every request.
+  Only one subtitle track is supported (no per-language selection) —
+  a real scope cut, not an oversight.
 - `app/routers/stream.py` — calls `transcode.resolve_playable_path(row)`
   to get the path to actually serve (original or cached remux; a
   `UnsupportedVideoCodec` becomes a `415`), then serves file bytes
@@ -170,9 +181,12 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   this both warms the transcode cache before real playback starts and
   lets a `415` (unsupported video codec) show a "download instead"
   message rather than a silent `<video>` failure — before pointing an
-  `<audio>`/`<video>` element at the same URL. Also polls
-  `/api/scan/status` after triggering a scan (the trigger endpoint
-  returns immediately, it doesn't wait for the scan to finish).
+  `<audio>`/`<video>` element at the same URL, plus a `<track>` for
+  video pointed at `/api/library/{id}/subtitles` (no pre-check needed
+  here — a 404 on a `<track src>` just gets ignored by the browser,
+  unlike a `<video src>` 415). Also polls `/api/scan/status` after
+  triggering a scan (the trigger endpoint returns immediately, it
+  doesn't wait for the scan to finish).
 - `deploy/` — templates for running as a persistent background
   service (systemd unit + env-file template for Linux, a batch
   script + env-file template for Windows), documented in the
