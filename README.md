@@ -112,6 +112,34 @@ If `PARZTREAM_PASSWORD` is unset, the server has **no
 authentication** — anyone who can reach the port can browse and
 stream. Recommended for anything beyond a fully trusted LAN.
 
+### Accessibility
+
+- Every media/folder row is a real `<button>`, reachable and
+  activatable with just a keyboard (Tab + Enter/Space) — not a click
+  handler on a non-interactive element.
+- A "Skip to content" link (visible on keyboard focus) lets keyboard
+  users bypass the header controls and jump straight to the library.
+- Search, filter, and login fields have real (if visually hidden)
+  `<label>`s — placeholder text alone isn't a substitute for screen
+  reader users.
+- Scan progress, search result counts, and playback state changes are
+  announced to screen readers via a live region — previously these
+  were silent unless you happened to be focused on the exact element
+  that changed.
+- Text/background color contrast throughout meets WCAG AA (verified
+  by calculating actual contrast ratios for every color pair in the
+  palette, not eyeballed).
+
+Known gap, left as a deliberate scope cut: touch targets meet WCAG
+2.2's AA minimum (24×24px) but not the stricter AAA guideline
+(44×44px) — fixing that properly means a broader spacing/layout pass
+that needs real-device testing to get right, which wasn't available
+while building this. None of the above was verified with a real
+screen reader or an automated tool like axe-core either (no browser
+automation was available in the environment this was built in) — it's
+built correctly per the relevant WCAG success criteria and carefully
+reviewed, not screen-reader-tested.
+
 ## Configuration
 
 Set via environment variables:

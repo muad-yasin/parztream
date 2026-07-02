@@ -39,11 +39,15 @@ function renderBrowser(directories) {
   }
   for (const name of directories) {
     const li = document.createElement("li");
-    li.textContent = name;
-    li.addEventListener("click", () => {
+    const rowBtn = document.createElement("button");
+    rowBtn.type = "button";
+    rowBtn.className = "row-btn";
+    rowBtn.textContent = name;
+    rowBtn.addEventListener("click", () => {
       const separator = currentPath.endsWith("/") || currentPath.endsWith("\\") ? "" : "/";
       browse(`${currentPath}${separator}${name}`);
     });
+    li.appendChild(rowBtn);
     folderListEl.appendChild(li);
   }
 }

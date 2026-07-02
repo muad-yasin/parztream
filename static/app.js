@@ -6,9 +6,14 @@ const scanBtn = document.getElementById("scan-btn");
 const logoutBtn = document.getElementById("logout-btn");
 const playerContainer = document.getElementById("player-container");
 const pagerEl = document.getElementById("pager");
+const announcerEl = document.getElementById("status-announcer");
 
 const PAGE_SIZE = 50;
 let offset = 0;
+
+function announce(message) {
+  announcerEl.textContent = message;
+}
 
 async function loadShowList() {
   const selected = showSelectEl.value;
@@ -43,6 +48,10 @@ async function loadLibrary() {
   const data = await res.json();
   renderList(data.items, query);
   renderPager(data.total);
+
+  if (query) {
+    announce(data.total === 0 ? `No results for "${query}"` : `${data.total} result${data.total === 1 ? "" : "s"} for "${query}"`);
+  }
 }
 
 function renderList(items, query) {
@@ -59,20 +68,26 @@ function renderList(items, query) {
   for (const item of items) {
     const li = document.createElement("li");
 
+    const rowBtn = document.createElement("button");
+    rowBtn.type = "button";
+    rowBtn.className = "row-btn";
+
     const img = document.createElement("img");
     img.className = "thumb";
     img.loading = "lazy";
     img.src = `/api/library/${item.id}/art`;
+    img.alt = ""; // decorative -- the label span below already names the item
     img.onerror = () => { img.style.visibility = "hidden"; };
-    li.appendChild(img);
+    rowBtn.appendChild(img);
 
     const label = document.createElement("span");
     const episodeTag = item.show_name ? `S${item.season_number}E${item.episode_number} — ` : "";
     const title = item.artist ? `${item.title} — ${item.artist}` : (item.title || item.path);
     label.textContent = episodeTag + title;
-    li.appendChild(label);
+    rowBtn.appendChild(label);
 
-    li.addEventListener("click", () => playMedia(item));
+    rowBtn.addEventListener("click", () => playMedia(item));
+    li.appendChild(rowBtn);
     listEl.appendChild(li);
   }
 }
@@ -113,6 +128,7 @@ async function playMedia(item) {
   preparing.className = "player-message";
   preparing.textContent = "Preparing…";
   playerContainer.appendChild(preparing);
+  announce(`Preparing ${item.title || "playback"}…`);
 
   // A tiny ranged probe first: if the file needs a container/audio fix
   // (see app/transcode.py), this is also what triggers and waits for that
@@ -124,6 +140,7 @@ async function playMedia(item) {
     probe = await fetch(streamUrl, { headers: { Range: "bytes=0-1" } });
   } catch (err) {
     preparing.textContent = "Couldn't reach the server.";
+    announce("Couldn't reach the server.");
     return;
   }
 
@@ -141,6 +158,7 @@ async function playMedia(item) {
     link.download = "";
     msg.appendChild(link);
     playerContainer.appendChild(msg);
+    announce("This file's video format can't be played in the browser. A download link is available.");
     return;
   }
 
@@ -161,6 +179,7 @@ async function playMedia(item) {
     el.appendChild(track);
   }
   playerContainer.appendChild(el);
+  announce(`Now playing ${item.title || tag}.`);
 }
 
 filterEl.addEventListener("change", () => {
@@ -196,10 +215,12 @@ async function pollScanStatus() {
 scanBtn.addEventListener("click", async () => {
   scanBtn.disabled = true;
   scanBtn.textContent = "Scanning...";
+  announce("Scanning library…");
   const res = await fetch("/api/scan", { method: "POST" });
   if (res.status !== 409 && !res.ok) {
     scanBtn.disabled = false;
     scanBtn.textContent = "Scan library";
+    announce("Scan failed to start.");
     return;
   }
   const status = await pollScanStatus();
@@ -208,6 +229,7 @@ scanBtn.addEventListener("click", async () => {
   await loadLibrary();
   scanBtn.disabled = false;
   scanBtn.textContent = status.status === "error" ? "Scan failed — retry" : "Scan library";
+  announce(status.status === "error" ? "Scan failed." : "Scan complete.");
 });
 
 logoutBtn.addEventListener("click", async () => {

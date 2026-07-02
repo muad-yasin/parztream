@@ -64,14 +64,26 @@
       margin-top: 0.75rem;
       text-align: center;
     }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
   </style>
 </head>
 <body>
   <form class="login-card" id="login-form">
     <h1>parztream</h1>
+    <label for="password" class="sr-only">Password</label>
     <input type="password" id="password" placeholder="Password" autofocus required>
     <button type="submit">Log in</button>
-    <p class="error" id="error"></p>
+    <p class="error" id="error" role="alert"></p>
   </form>
 
   <script>

@@ -293,9 +293,12 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
 - `static/` — plain JS, no bundler. `app.js` fetches `/api/library`
   (with `limit`/`offset`/`q`, tracked in module-level `offset`/search-
   input state, reset to 0 on filter change, show-select change,
-  search input, or after a scan), renders a clickable list with a
-  lazy-loaded `<img src="/api/library/{id}/art">` per row (hidden via
-  `onerror` if 404), prefixed with `S{season}E{episode}` when
+  search input, or after a scan), renders each row as `<li><button
+  class="row-btn">...` — a real `<button>`, not a click handler on the
+  `<li>` (see "Accessibility" below for why that distinction matters)
+  — with a lazy-loaded, `alt=""` (decorative — the adjacent text label
+  already names the item) `<img src="/api/library/{id}/art">` (hidden
+  via `onerror` if 404), prefixed with `S{season}E{episode}` when
   `show_name` is set, or an "empty" message (different text for "no
   media scanned yet" vs. "no search results") when the list is empty.
   The search `<input>` is debounced 300ms (`searchDebounceTimer`) so
@@ -340,6 +343,48 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   crafted link with `?next=https://evil.example`. The header's
   "Log out" button `POST`s `/api/logout` then sends you to
   `/login.html` directly.
+
+  **Accessibility conventions, apply these to any new interactive UI:**
+  - Any clickable row/list item must be a real `<button>` wrapping the
+    row's content (class `row-btn`, styled in `style.css` to look like
+    a plain row — no default button chrome), never a `click` handler
+    on a non-interactive element like `<li>`/`<div>`. This is a
+    confirmed-real fix, not theoretical: before this, list rows were
+    entirely unreachable by keyboard.
+  - Icon-only controls (no visible text, e.g. `setup.html`'s `⬆` up
+    button) need an explicit `aria-label` — a `title` attribute alone
+    isn't reliably exposed to screen readers and isn't visible until
+    hover for sighted users either.
+  - Any `<input>`/`<select>` needs a real `<label>`, even if it's
+    visually hidden via the `.sr-only` class (defined in `style.css`
+    and, since `login.html` doesn't link that stylesheet, duplicated
+    inline there too) — a placeholder is not an accessible-name
+    substitute, and disappears once the user starts typing anyway.
+  - Content that changes without a page navigation (scan status,
+    search result counts, player state) should call `app.js`'s
+    `announce(message)` helper, which writes into the hidden
+    `#status-announcer` (`aria-live="polite"`) — otherwise screen
+    reader users get no feedback that anything happened. `setup.html`
+    has its own local live regions instead (`#current-path` as
+    `aria-live="polite"`, `#setup-error` as `role="alert"`) since it
+    doesn't share `app.js`.
+  - `<img>` elements need an explicit `alt` — `alt=""` when the image
+    is purely decorative/redundant with adjacent text (e.g. the
+    library thumbnails, since the title label right next to them
+    already identifies the item), a real description otherwise. Never
+    leave `alt` unset.
+  - Color contrast in the existing dark palette (`#14161a`/`#1e2127`/
+    `#23262c` backgrounds, `#e6e6e6`/`#9aa0aa` text, `#7aa2f7` links,
+    `#f78c8c` errors) was verified by calculating actual WCAG contrast
+    ratios, not eyeballed — all pass AA, most pass AAA. If you add a
+    new color, check it the same way rather than assuming a dark theme
+    is automatically fine.
+  - None of this was tested with a real screen reader or an automated
+    tool (axe-core, Lighthouse) — no browser automation was available
+    in the environment this was built in. It's built correct per the
+    relevant WCAG success criteria and carefully code-reviewed, that's
+    a different (weaker) claim than "verified" — don't oversell it as
+    tested if you're asked about it later.
 - `deploy/` — templates for running as a persistent background
   service (systemd unit + env-file template for Linux, a batch
   script + env-file template for Windows), documented in the

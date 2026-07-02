@@ -7,29 +7,39 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+  <a href="#main-content" class="skip-link">Skip to content</a>
+
   <header>
     <h1>parztream</h1>
     <div class="controls">
+      <label for="search-input" class="sr-only">Search library</label>
       <input id="search-input" type="search" placeholder="Search…">
+
+      <label for="filter" class="sr-only">Filter by media type</label>
       <select id="filter">
         <option value="">All</option>
         <option value="audio">Audio</option>
         <option value="video">Video</option>
       </select>
+
+      <label for="show-select" class="sr-only">Filter by show</label>
       <select id="show-select">
         <option value="">All shows</option>
       </select>
+
       <button id="scan-btn">Scan library</button>
       <a id="settings-link" href="/setup.html" title="Manage media folders">Settings</a>
       <button id="logout-btn" title="Log out">Log out</button>
     </div>
   </header>
 
-  <main>
+  <main id="main-content" tabindex="-1">
     <ul id="media-list"></ul>
     <div id="pager"></div>
     <div id="player-container"></div>
   </main>
+
+  <div id="status-announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 
   <script src="/app.js"></script>
 </body>

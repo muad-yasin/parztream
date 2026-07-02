@@ -19,8 +19,8 @@
 
     <div class="browser">
       <div class="browser-path">
-        <button id="up-btn" title="Up one level">⬆</button>
-        <span id="current-path"></span>
+        <button id="up-btn" aria-label="Up one level" title="Up one level">⬆</button>
+        <span id="current-path" role="status" aria-live="polite"></span>
       </div>
       <ul id="folder-list"></ul>
       <button id="add-folder-btn">Add this folder</button>
@@ -33,7 +33,7 @@
     </div>
 
     <button id="save-btn" disabled>Save &amp; start scanning</button>
-    <p id="setup-error" class="setup-error"></p>
+    <p id="setup-error" class="setup-error" role="alert"></p>
   </main>
 
   <script src="/setup.js"></script>
