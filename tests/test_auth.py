@@ -19,6 +19,17 @@ def test_login_page_itself_is_reachable_with_no_session(client, monkeypatch):
     assert res.status_code == 200
 
 
+def test_icon_and_manifest_assets_are_reachable_with_no_session(client, monkeypatch):
+    # login.html links to these (favicon, apple-touch-icon, manifest.json)
+    # -- if they required a session, the tab icon and "Add to Home Screen"
+    # would silently be broken on the one page that's supposed to work
+    # before logging in.
+    monkeypatch.setattr(auth, "AUTH_PASSWORD", "secret")
+
+    for path in ["/manifest.json", "/icon-192.png", "/icon-512.png", "/favicon-32.png"]:
+        assert client.get(path).status_code == 200, path
+
+
 def test_api_request_without_a_session_gets_401_json(client, monkeypatch):
     monkeypatch.setattr(auth, "AUTH_PASSWORD", "secret")
 

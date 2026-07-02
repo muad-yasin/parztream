@@ -252,9 +252,16 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   real login page — non-technical-user UX was the whole motivation, see
   git history around "real login page" for the fuller reasoning.
   Gates the entire app uniformly except `PUBLIC_PATHS`
-  (`/login.html`, `/api/login` — deliberately minimal; `login.html` is
-  fully self-contained with inline CSS/JS specifically so nothing else
-  needs to be added here). No-ops entirely if `PARZTREAM_PASSWORD`
+  (`/login.html`, `/api/login`, plus `/manifest.json`/`/icon-192.png`/
+  `/icon-512.png`/`/favicon-32.png` — deliberately minimal otherwise;
+  `login.html` is fully self-contained with inline CSS/JS specifically
+  so nothing else needs to be added here. The icon/manifest files are
+  the one deliberate exception: `login.html` links to them so the tab
+  icon and "Add to Home Screen" work even before logging in, and
+  there's nothing sensitive in static branding images to justify
+  gating them. Confirmed live: without this, those links 401'd on the
+  one page that's supposed to work pre-auth — regression test in
+  `tests/test_auth.py`). No-ops entirely if `PARZTREAM_PASSWORD`
   isn't set, same as before. Distinguishes a real browser navigation
   from a `fetch()`/`<img>`/`<video>` request via the `Accept` header
   (`text/html` → `302` redirect to `/login.html?next=<original path>`;
@@ -428,6 +435,38 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
     relevant WCAG success criteria and carefully code-reviewed, that's
     a different (weaker) claim than "verified" — don't oversell it as
     tested if you're asked about it later.
+
+  **Mobile/PWA conventions:**
+  - The header (`header`/`.controls` in `style.css`) reflows to a
+    single column below 640px via a `@media (max-width: 640px)` block
+    — the flex layout stays row-based above that width. `.row-label`
+    (library row titles) gets `text-overflow: ellipsis` so a long
+    title/show name can't blow out the row width on a narrow screen.
+  - Fullscreen-on-play (`app.js`'s `requestVideoFullscreen`) is gated
+    on `window.matchMedia("(pointer: coarse)").matches`
+    (`isTouchDevice`), not a viewport-width check — a narrow desktop
+    window shouldn't trigger phone-style fullscreen, and a large
+    touchscreen tablet should. Tries the standard `el.requestFullscreen()`
+    first, falls back to `el.webkitEnterFullscreen()` for iOS Safari
+    (which doesn't implement the standard Fullscreen API for
+    `<video>` at all). Both paths are wrapped so a rejection/exception
+    never blocks playback — fullscreen is a nice-to-have, not a
+    requirement for the video to work.
+  - `static/manifest.json` + `static/icon-192.png`/`icon-512.png`/
+    `favicon-32.png` (dark rounded-square background, accent-blue
+    play-triangle, matching the app's existing palette) enable "Add to
+    Home Screen" with `display: standalone` (hides the browser chrome)
+    and a real icon instead of a generic globe. Linked from
+    `index.html`/`setup.html`/`login.html` (`<link rel="icon">`,
+    `<link rel="apple-touch-icon">`, `<link rel="manifest">`, plus a
+    `theme-color` meta tag). The icons were generated with a
+    locally-installed Pillow, used only as a one-off image-generation
+    tool — it is **not** a project dependency and isn't in either
+    requirements file.
+  - None of the above (header reflow, fullscreen-on-tap, "Add to Home
+    Screen" behavior) has been verified on a real phone — same caveat
+    as the accessibility work above, built correct against the
+    relevant web platform APIs and reviewed, not device-tested.
 - `deploy/` — templates for running as a persistent background
   service (systemd unit + env-file template for Linux, a batch
   script + env-file template for Windows), documented in the

@@ -11,8 +11,33 @@ const announcerEl = document.getElementById("status-announcer");
 const PAGE_SIZE = 50;
 let offset = 0;
 
+// "pointer: coarse" identifies touch-primary input specifically, not just
+// a narrow screen -- more reliable than a width-based check, since a small
+// desktop browser window shouldn't trigger phone-style fullscreen-on-play,
+// and a large-screen tablet in touch mode should.
+const isTouchDevice = window.matchMedia("(pointer: coarse)").matches;
+
 function announce(message) {
   announcerEl.textContent = message;
+}
+
+function requestVideoFullscreen(el) {
+  if (!isTouchDevice) return;
+  try {
+    if (el.requestFullscreen) {
+      // Fullscreen isn't guaranteed to succeed (browser policy, permissions
+      // policy, etc.) -- never let a rejection surface as an error, playback
+      // should carry on regardless either way.
+      el.requestFullscreen().catch(() => {});
+    } else if (el.webkitEnterFullscreen) {
+      // iOS Safari doesn't implement the standard Fullscreen API for
+      // <video> -- it has its own proprietary method that opens the native
+      // fullscreen video player instead.
+      el.webkitEnterFullscreen();
+    }
+  } catch (err) {
+    // Same reasoning: never let this break playback.
+  }
 }
 
 async function loadShowList() {
@@ -81,6 +106,7 @@ function renderList(items, query) {
     rowBtn.appendChild(img);
 
     const label = document.createElement("span");
+    label.className = "row-label";
     const episodeTag = item.show_name ? `S${item.season_number}E${item.episode_number} — ` : "";
     const title = item.artist ? `${item.title} — ${item.artist}` : (item.title || item.path);
     label.textContent = episodeTag + title;
@@ -179,6 +205,9 @@ async function playMedia(item) {
     el.appendChild(track);
   }
   playerContainer.appendChild(el);
+  if (tag === "video") {
+    requestVideoFullscreen(el);
+  }
   announce(`Now playing ${item.title || tag}.`);
 }
 

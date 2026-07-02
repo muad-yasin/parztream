@@ -14,8 +14,19 @@ _SESSION_VALUE = "authenticated"
 # Paths reachable with no session at all, since they're what makes logging
 # in possible in the first place. Deliberately minimal: login.html is fully
 # self-contained (inline CSS/JS) specifically so nothing else -- style.css,
-# app.js, /api/setup/* -- needs to be added here.
-PUBLIC_PATHS = {"/login.html", "/api/login"}
+# app.js, /api/setup/* -- needs to be added here. The icon/manifest files
+# are the one deliberate exception: login.html links to them (favicon,
+# apple-touch-icon, manifest.json) so the tab icon and "Add to Home Screen"
+# work correctly even before logging in, and there's nothing sensitive in a
+# handful of static branding images to justify gating them.
+PUBLIC_PATHS = {
+    "/login.html",
+    "/api/login",
+    "/manifest.json",
+    "/icon-192.png",
+    "/icon-512.png",
+    "/favicon-32.png",
+}
 
 _serializer = URLSafeTimedSerializer(SECRET_KEY, salt="parztream-session")
 

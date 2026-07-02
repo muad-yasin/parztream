@@ -50,6 +50,8 @@ header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
   padding: 1rem 1.5rem;
   background: #1e2127;
   border-bottom: 1px solid #2a2e35;
@@ -62,6 +64,7 @@ header h1 {
 
 .controls {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
 }
 
@@ -76,6 +79,32 @@ select, button, input[type="search"] {
 
 input[type="search"] {
   width: 12rem;
+}
+
+/* Below ~640px (most phones in portrait), give the search box the full
+   row instead of a cramped fixed width, and let every other control wrap
+   onto its own row rather than overflowing the viewport horizontally --
+   there was no responsive behavior here at all before this. */
+@media (max-width: 640px) {
+  header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .controls {
+    width: 100%;
+  }
+
+  input[type="search"] {
+    width: 100%;
+    flex: 1 1 100%;
+  }
+
+  .controls select,
+  .controls button,
+  .controls #settings-link {
+    flex: 1 1 auto;
+  }
 }
 
 button {
@@ -159,6 +188,12 @@ ul#media-list li:last-child {
 .row-btn:focus-visible {
   outline: 2px solid #7aa2f7;
   outline-offset: -2px;
+}
+
+.row-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .thumb {

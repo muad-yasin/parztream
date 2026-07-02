@@ -67,6 +67,25 @@ both generated the first time they're requested and cached after — is
 searchable (title/artist/album/show name, case-insensitive substring
 match), and is paginated 50 items at a time.
 
+### On a phone
+
+- The header controls (search, filters, buttons) reflow onto their
+  own rows below ~640px instead of overflowing sideways.
+- Tapping a video on a touch device requests fullscreen automatically
+  (falls back to iOS Safari's own native fullscreen video API, which
+  doesn't support the standard Fullscreen API for `<video>`). Never
+  blocks playback if it fails — some browsers/contexts don't grant it.
+- "Add to Home Screen" gets a real app icon and, with `display:
+  standalone` in the manifest, hides the browser's address bar —
+  closer to a real app than a bookmark.
+
+Honest caveat: none of the above (the header reflow, the fullscreen
+request, autoplay after tapping a row) has been verified on a real
+phone — no device was available while building this. It's written to
+the relevant web platform APIs correctly and reviewed carefully, not
+device-tested. If something doesn't behave as described, that's the
+first place to look.
+
 ### TV show grouping
 
 Video files named like `Show Name S01E02...` (dots/underscores/spaces
