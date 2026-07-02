@@ -5,10 +5,10 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from .auth import BasicAuthMiddleware
+from .auth import SessionAuthMiddleware
 from .config import AUTH_PASSWORD
 from .db import init_db
-from .routers import library, setup, stream
+from .routers import library, login, setup, stream
 
 logger = logging.getLogger("parztream")
 
@@ -24,11 +24,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="parztream", lifespan=lifespan)
-app.add_middleware(BasicAuthMiddleware)
+app.add_middleware(SessionAuthMiddleware)
 
 app.include_router(library.router)
 app.include_router(stream.router)
 app.include_router(setup.router)
+app.include_router(login.router)
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

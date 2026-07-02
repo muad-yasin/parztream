@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Log in — parztream</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #14161a;
+      color: #e6e6e6;
+    }
+    .login-card {
+      width: 100%;
+      max-width: 320px;
+      padding: 2rem;
+      border: 1px solid #2a2e35;
+      border-radius: 8px;
+      background: #1e2127;
+    }
+    h1 {
+      font-size: 1.25rem;
+      margin: 0 0 1.5rem;
+      text-align: center;
+    }
+    input {
+      width: 100%;
+      font: inherit;
+      padding: 0.6rem 0.75rem;
+      border-radius: 6px;
+      border: 1px solid #3a3f47;
+      background: #23262c;
+      color: inherit;
+      margin-bottom: 1rem;
+    }
+    button {
+      width: 100%;
+      font: inherit;
+      padding: 0.6rem 0.75rem;
+      border-radius: 6px;
+      border: none;
+      background: #7aa2f7;
+      color: #14161a;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #93b4f8;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .error {
+      color: #f78c8c;
+      font-size: 0.9rem;
+      min-height: 1.2rem;
+      margin-top: 0.75rem;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <form class="login-card" id="login-form">
+    <h1>parztream</h1>
+    <input type="password" id="password" placeholder="Password" autofocus required>
+    <button type="submit">Log in</button>
+    <p class="error" id="error"></p>
+  </form>
+
+  <script>
+    const form = document.getElementById("login-form");
+    const passwordInput = document.getElementById("password");
+    const errorEl = document.getElementById("error");
+    const submitBtn = form.querySelector("button");
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      errorEl.textContent = "";
+      submitBtn.disabled = true;
+
+      let res;
+      try {
+        res = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: passwordInput.value }),
+        });
+      } catch (err) {
+        errorEl.textContent = "Couldn't reach the server.";
+        submitBtn.disabled = false;
+        return;
+      }
+
+      if (res.ok) {
+        const params = new URLSearchParams(window.location.search);
+        const next = params.get("next");
+        window.location.href = next && next.startsWith("/") ? next : "/";
+        return;
+      }
+
+      submitBtn.disabled = false;
+      errorEl.textContent = res.status === 401 ? "Incorrect password." : "Something went wrong.";
+      passwordInput.value = "";
+      passwordInput.focus();
+    });
+  </script>
+</body>
+</html>

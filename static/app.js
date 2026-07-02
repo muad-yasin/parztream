@@ -3,6 +3,7 @@ const filterEl = document.getElementById("filter");
 const showSelectEl = document.getElementById("show-select");
 const searchInputEl = document.getElementById("search-input");
 const scanBtn = document.getElementById("scan-btn");
+const logoutBtn = document.getElementById("logout-btn");
 const playerContainer = document.getElementById("player-container");
 const pagerEl = document.getElementById("pager");
 
@@ -207,6 +208,11 @@ scanBtn.addEventListener("click", async () => {
   await loadLibrary();
   scanBtn.disabled = false;
   scanBtn.textContent = status.status === "error" ? "Scan failed — retry" : "Scan library";
+});
+
+logoutBtn.addEventListener("click", async () => {
+  await fetch("/api/logout", { method: "POST" });
+  window.location.href = "/login.html";
 });
 
 async function init() {

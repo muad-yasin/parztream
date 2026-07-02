@@ -1,5 +1,6 @@
 import mimetypes
 import os
+import secrets
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -33,3 +34,17 @@ mimetypes.add_type("audio/mp4", ".m4b")
 
 AUTH_USERNAME = os.environ.get("PARZTREAM_USERNAME", "parztream")
 AUTH_PASSWORD = os.environ.get("PARZTREAM_PASSWORD")
+
+# Signs session cookies (see app/auth.py). If unset, a random key is
+# generated at every process start -- simplest zero-config default, at the
+# cost of everyone's session getting invalidated (and needing to log in
+# again) on every restart. Set PARZTREAM_SECRET_KEY to a fixed random value
+# to keep sessions alive across restarts.
+SECRET_KEY = os.environ.get("PARZTREAM_SECRET_KEY") or secrets.token_hex(32)
+
+# How long a login lasts before needing to sign in again, in seconds.
+# Deliberately long (90 days): this gates a home media library behind a
+# single shared password, not sensitive per-user data, and the people most
+# affected by frequent forced re-logins are exactly the least technical
+# users this is meant to be easy for.
+SESSION_MAX_AGE = 60 * 60 * 24 * 90

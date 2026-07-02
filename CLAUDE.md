@@ -240,15 +240,55 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   a new file (see `app/cache.py`) — an evicted file isn't a loss, just
   a cache miss on next play (cheap to re-derive, unlike the original
   scan metadata).
-- `app/auth.py` — `BasicAuthMiddleware`, a pure ASGI middleware (not
+- `app/auth.py` — `SessionAuthMiddleware`, a pure ASGI middleware (not
   `BaseHTTPMiddleware`, which buffers `StreamingResponse` bodies —
-  that would hurt streaming large files). Gates the entire app,
-  including the static UI and streaming, uniformly. No-ops entirely
-  if `PARZTREAM_PASSWORD` isn't set.
+  that would hurt streaming large files). Replaced `BasicAuthMiddleware`
+  (HTTP Basic Auth, which gave every visitor the browser's native,
+  unbranded credential popup) with a signed session cookie set by a
+  real login page — non-technical-user UX was the whole motivation, see
+  git history around "real login page" for the fuller reasoning.
+  Gates the entire app uniformly except `PUBLIC_PATHS`
+  (`/login.html`, `/api/login` — deliberately minimal; `login.html` is
+  fully self-contained with inline CSS/JS specifically so nothing else
+  needs to be added here). No-ops entirely if `PARZTREAM_PASSWORD`
+  isn't set, same as before. Distinguishes a real browser navigation
+  from a `fetch()`/`<img>`/`<video>` request via the `Accept` header
+  (`text/html` → `302` redirect to `/login.html?next=<original path>`;
+  anything else → `401` JSON) — don't "simplify" this to always redirect
+  or always 401, both branches are load-bearing: a JS `fetch()` getting
+  an HTML redirect body where it expects JSON would break silently, and
+  a top-level page load getting a bare `401` would show raw JSON
+  instead of the login page.
+  Sessions are itsdangerous-signed cookies (`URLSafeTimedSerializer`,
+  keyed by `config.SECRET_KEY`) carrying no real payload beyond a fixed
+  marker string + timestamp — verified via signature + `SESSION_MAX_AGE`
+  (90 days), not looked up against any server-side store. That means
+  logout (`app/routers/login.py`) only works by telling the *client* to
+  stop sending the cookie (`Response.delete_cookie`) — there's no
+  revocation list, so a copied cookie value stays valid until it
+  expires on its own regardless of logout, and changing
+  `PARZTREAM_PASSWORD` does **not** invalidate already-issued sessions
+  (only rotating `SECRET_KEY` does, since that's what sessions are
+  signed against, not the password). This is a known, accepted
+  trade-off for a stateless design, not an oversight — document it if
+  you touch this, don't silently "fix" it into a stateful store without
+  discussing the trade-off first.
+  No `Secure` flag on the cookie: parztream runs over plain HTTP by
+  design (see README), and a `Secure` cookie is never sent back at all
+  over a non-HTTPS connection — setting it would silently break every
+  login.
+- `app/routers/login.py` — `POST /api/login` (checks
+  `auth.check_credentials`, sets the session cookie), `POST /api/logout`
+  (clears it). References `auth.AUTH_PASSWORD`/`auth.AUTH_USERNAME` via
+  the `auth` module object (`from .. import auth`, then `auth.AUTH_PASSWORD`
+  at call time) rather than `from ..auth import AUTH_PASSWORD` — the
+  latter would bind its own independent copy at import time that tests
+  monkeypatching `auth.AUTH_PASSWORD` wouldn't reach. Same "quirk" as
+  `config.py`'s other consumers, documented further down.
 - `app/main.py` — wires routers and mounts `static/` at `/`. Route
   registration order matters: API routers are included *before* the
   `StaticFiles` mount, since the static mount is a catch-all at `/`.
-  `BasicAuthMiddleware` is added at app level so it covers everything
+  `SessionAuthMiddleware` is added at app level so it covers everything
   behind it.
 - `static/` — plain JS, no bundler. `app.js` fetches `/api/library`
   (with `limit`/`offset`/`q`, tracked in module-level `offset`/search-
@@ -287,6 +327,19 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   redirects to `/` on success. Deliberately no path-typing fallback —
   browse-only, since the whole point is not requiring the user to know
   an exact filesystem path.
+  `login.html` is standalone, not a view inside `index.html` — inline
+  `<style>`/`<script>`, no dependency on `style.css`/`app.js`, so it
+  never needs to be in `auth.PUBLIC_PATHS` beyond itself. Password-only
+  form (no username field) — `AUTH_USERNAME` is applied server-side
+  without the user ever entering it, since it's almost never changed
+  from the default and asking for it adds a confusing "wait, what's my
+  username?" moment for the non-technical audience this is aimed at.
+  Reads `?next=` from its own URL to return you to whatever page
+  triggered the redirect, but only if it's a relative path
+  (`next.startsWith("/")`) — guards against an open-redirect via a
+  crafted link with `?next=https://evil.example`. The header's
+  "Log out" button `POST`s `/api/logout` then sends you to
+  `/login.html` directly.
 - `deploy/` — templates for running as a persistent background
   service (systemd unit + env-file template for Linux, a batch
   script + env-file template for Windows), documented in the
@@ -299,18 +352,29 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
 
 Test isolation relies on a quirk worth knowing: `config.py` reads env
 vars into module-level constants at import time, and `db.py`/
-`scanner.py`/`auth.py` import those by name (`from .config import
-DB_PATH`, etc.), so patching env vars after startup does nothing.
+`auth.py`/etc. import those by name (`from .config import DB_PATH`,
+etc.), so patching env vars after startup does nothing.
 `tests/conftest.py` instead monkeypatches the *consuming* module's
 attribute directly (e.g. `monkeypatch.setattr(db, "DB_PATH", ...)`,
-`monkeypatch.setattr(scanner, "MEDIA_DIRS", ...)`) — that works
-because each function looks up the name in its own module's globals
-at call time. `CACHE_DIR` in particular is imported separately by
-*three* modules (`transcode.py`, `artwork.py`, `cache.py`), all of
-which need patching to the same tmp path for a test to see one
-consistent cache dir — `isolated_app_state` does all three. If you
-add a new config value, follow the same pattern
-rather than trying to override the environment mid-test.
+`monkeypatch.setattr(config, "MEDIA_DIRS", ...)`) — that works because
+each function looks up the name in its own module's globals at call
+time. `CACHE_DIR` in particular is imported separately by *three*
+modules (`transcode.py`, `artwork.py`, `cache.py`), all of which need
+patching to the same tmp path for a test to see one consistent cache
+dir — `isolated_app_state` does all three.
+
+This same quirk is why `app/routers/login.py` deliberately imports
+`from .. import auth` and writes `auth.AUTH_PASSWORD` instead of
+`from ..auth import AUTH_PASSWORD` — the latter binds its own
+independent copy at import time, which `monkeypatch.setattr(auth,
+"AUTH_PASSWORD", ...)` in tests would never reach. When a module needs
+a value another module already imported from `config` (rather than
+importing straight from `config` itself), prefer referencing the
+other module's attribute at call time over re-importing from `config`
+directly — keeps there being one obvious place tests need to patch.
+
+If you add a new config value, follow the same pattern rather than
+trying to override the environment mid-test.
 
 ## Conventions
 

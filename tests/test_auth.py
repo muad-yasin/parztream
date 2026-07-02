@@ -1,11 +1,4 @@
-import base64
-
 from app import auth
-
-
-def _basic_header(username, password):
-    token = base64.b64encode(f"{username}:{password}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
 
 
 def test_no_password_configured_allows_open_access(client):
@@ -18,35 +11,88 @@ def test_no_password_configured_allows_static_ui(client):
     assert res.status_code == 200
 
 
-def test_password_configured_rejects_missing_credentials(client, monkeypatch):
+def test_login_page_itself_is_reachable_with_no_session(client, monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PASSWORD", "secret")
+
+    res = client.get("/login.html")
+
+    assert res.status_code == 200
+
+
+def test_api_request_without_a_session_gets_401_json(client, monkeypatch):
     monkeypatch.setattr(auth, "AUTH_PASSWORD", "secret")
 
     res = client.get("/api/library")
 
     assert res.status_code == 401
-    assert res.headers["www-authenticate"] == 'Basic realm="parztream"'
+    assert res.json() == {"detail": "Not authenticated"}
 
 
-def test_password_configured_rejects_wrong_credentials(client, monkeypatch):
+def test_browser_navigation_without_a_session_redirects_to_login(client, monkeypatch):
     monkeypatch.setattr(auth, "AUTH_PASSWORD", "secret")
 
-    res = client.get("/api/library", headers=_basic_header("parztream", "wrong"))
+    res = client.get("/", headers={"Accept": "text/html"}, follow_redirects=False)
+
+    assert res.status_code == 302
+    assert res.headers["location"].startswith("/login.html?next=")
+
+
+def test_login_with_wrong_password_is_rejected_and_sets_no_cookie(client, monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PASSWORD", "secret")
+
+    res = client.post("/api/login", json={"password": "wrong"})
 
     assert res.status_code == 401
+    assert "set-cookie" not in res.headers
 
 
-def test_password_configured_accepts_correct_credentials(client, monkeypatch):
+def test_login_when_auth_not_enabled_returns_400(client):
+    res = client.post("/api/login", json={"password": "anything"})
+    assert res.status_code == 400
+
+
+def test_login_with_correct_password_grants_access_to_protected_routes(client, monkeypatch):
     monkeypatch.setattr(auth, "AUTH_PASSWORD", "secret")
 
-    res = client.get("/api/library", headers=_basic_header("parztream", "secret"))
+    login_res = client.post("/api/login", json={"password": "secret"})
+    assert login_res.status_code == 200
+    assert auth.SESSION_COOKIE_NAME in login_res.cookies
 
+    # TestClient persists cookies across requests on the same client, like a
+    # real browser session.
+    res = client.get("/api/library")
     assert res.status_code == 200
 
 
-def test_password_configured_protects_static_ui_too(client, monkeypatch):
+def test_session_cookie_is_httponly_and_samesite_lax_and_not_secure(client, monkeypatch):
     monkeypatch.setattr(auth, "AUTH_PASSWORD", "secret")
 
-    res = client.get("/")
+    res = client.post("/api/login", json={"password": "secret"})
+
+    set_cookie = res.headers["set-cookie"]
+    assert "HttpOnly" in set_cookie
+    assert "SameSite=lax" in set_cookie.lower().replace("samesite=lax", "SameSite=lax")
+    # No Secure flag: parztream runs over plain HTTP by design (see
+    # README) -- a Secure cookie would never be sent back over HTTP at all,
+    # silently breaking every login.
+    assert "Secure" not in set_cookie
+
+
+def test_logout_clears_the_session(client, monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PASSWORD", "secret")
+    client.post("/api/login", json={"password": "secret"})
+    assert client.get("/api/library").status_code == 200
+
+    client.post("/api/logout")
+
+    assert client.get("/api/library").status_code == 401
+
+
+def test_tampered_session_cookie_is_rejected(client, monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PASSWORD", "secret")
+    client.cookies.set(auth.SESSION_COOKIE_NAME, "not-a-real-signed-value")
+
+    res = client.get("/api/library")
 
     assert res.status_code == 401
 
@@ -55,6 +101,14 @@ def test_custom_username_is_respected(client, monkeypatch):
     monkeypatch.setattr(auth, "AUTH_PASSWORD", "secret")
     monkeypatch.setattr(auth, "AUTH_USERNAME", "admin")
 
-    res = client.get("/api/library", headers=_basic_header("admin", "secret"))
+    res = client.post("/api/login", json={"password": "secret"})
 
     assert res.status_code == 200
+    assert client.get("/api/library").status_code == 200
+
+
+def test_check_credentials_is_timing_safe_not_just_equal(monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PASSWORD", "secret")
+    assert auth.check_credentials("parztream", "secret") is True
+    assert auth.check_credentials("parztream", "wrong") is False
+    assert auth.check_credentials("someone-else", "secret") is False

@@ -91,6 +91,27 @@ blocked) — the video quality/resolution never changes, and a
 genuinely incompatible video codec stays incompatible for in-browser
 playback specifically, not unplayable everywhere.
 
+### Login
+
+If `PARZTREAM_PASSWORD` is set, the whole app requires signing in
+first through a proper login page (`/login.html`) — not the browser's
+native, unbranded Basic Auth popup. A successful login sets a signed
+session cookie good for 90 days, so you're not asked again on every
+visit; "Log out" in the header (or `POST /api/logout`) clears it.
+
+Worth knowing: sessions are self-contained signed cookies, not
+tracked server-side, so logging out only works by telling the
+*browser* to stop sending the cookie — it doesn't invalidate that
+specific cookie value on the server. A copied cookie stays valid
+until it expires on its own. If you ever suspect a session leaked,
+set/rotate `PARZTREAM_SECRET_KEY` (below) and restart — that
+invalidates every existing session at once, which changing
+`PARZTREAM_PASSWORD` alone does **not** do.
+
+If `PARZTREAM_PASSWORD` is unset, the server has **no
+authentication** — anyone who can reach the port can browse and
+stream. Recommended for anything beyond a fully trusted LAN.
+
 ## Configuration
 
 Set via environment variables:
@@ -102,12 +123,18 @@ Set via environment variables:
   and this env var is ignored, even if it's still set.
 - `PARZTREAM_DB_PATH` — SQLite file location (defaults to
   `parztream.db` in the project root).
-- `PARZTREAM_PASSWORD` — if set, the whole app (UI, API, streaming)
-  requires HTTP Basic Auth with this password. If unset, the server
-  has **no authentication** — anyone who can reach the port can
-  browse and stream. Recommended for anything beyond local testing.
-- `PARZTREAM_USERNAME` — Basic Auth username (defaults to
-  `parztream`), only relevant when `PARZTREAM_PASSWORD` is set.
+- `PARZTREAM_PASSWORD` — enables login (see "Login" above). Unset by
+  default, meaning no authentication at all.
+- `PARZTREAM_USERNAME` — login username (defaults to `parztream`),
+  only relevant when `PARZTREAM_PASSWORD` is set. The login page only
+  asks for a password, not a username — this only matters if you're
+  calling `POST /api/login` directly rather than through the page.
+- `PARZTREAM_SECRET_KEY` — signs session cookies. If unset, a random
+  key is generated every time the process starts, which means
+  **everyone's logged out on every restart**. Set this to a fixed
+  random value (e.g. `python3 -c "import secrets; print(secrets.token_hex(32))"`)
+  to keep people logged in across restarts — or deliberately leave it
+  unset if you'd rather every restart force a fresh login.
 - `PARZTREAM_CACHE_DIR` — where repackaged videos (see "Playback
   compatibility" below) and generated video thumbnails are cached
   (defaults to `cache/` in the project root). Grows roughly
