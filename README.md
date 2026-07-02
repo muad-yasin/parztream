@@ -45,6 +45,62 @@ Set via environment variables:
 - `PARZTREAM_USERNAME` — Basic Auth username (defaults to
   `parztream`), only relevant when `PARZTREAM_PASSWORD` is set.
 
+## Running as a service
+
+The commands above run parztream in the foreground; it stops when you
+close the terminal and won't restart on crash or reboot. Templates
+for running it as a persistent background service are in `deploy/`.
+
+### Linux (systemd)
+
+1. Put the project at a stable location (e.g. `/opt/parztream`),
+   including its `.venv` (see Setup above), and create a system user
+   to run it as:
+   ```bash
+   sudo useradd --system --home-dir /opt/parztream --shell /usr/sbin/nologin parztream
+   sudo chown -R parztream:parztream /opt/parztream
+   ```
+2. Copy the env template and fill in real values — keep it outside
+   the project checkout since it holds a password:
+   ```bash
+   sudo mkdir -p /etc/parztream
+   sudo cp deploy/systemd/parztream.env.example /etc/parztream/parztream.env
+   sudo chmod 600 /etc/parztream/parztream.env
+   sudo $EDITOR /etc/parztream/parztream.env
+   ```
+3. Install and start the unit:
+   ```bash
+   sudo cp deploy/systemd/parztream.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now parztream
+   ```
+4. Check status/logs: `systemctl status parztream`, `journalctl -u parztream -f`.
+
+Edit `User`/`WorkingDirectory`/`ExecStart` in the unit file first if
+your paths or username differ from the example. Don't add
+`--workers` to `ExecStart` — scan status/locking lives in one
+process's memory (see `app/scanner.py`), so multiple worker
+processes would silently break the concurrent-scan-rejects-with-409
+behavior.
+
+### Windows
+
+There's no systemd equivalent; `deploy/windows/run-parztream.bat`
+plus an env file (`deploy/windows/parztream.env.bat.example`, copy to
+`C:\ProgramData\parztream\parztream.env.bat` and fill in real values)
+gets you a runnable script. To make it persistent, either:
+
+- **Task Scheduler** — create a task that runs
+  `run-parztream.bat` at log-on/startup. Simplest, but it runs as a
+  visible background process tied to a login session, not a true
+  Windows service.
+- **[NSSM](https://nssm.cc/)** — wraps the batch script as an actual
+  Windows service with restart-on-failure, closer to the systemd
+  setup above.
+
+These Windows steps are untested — they're written from documented
+behavior, not verified on an actual Windows machine.
+
 ## Testing
 
 ```bash

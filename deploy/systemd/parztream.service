@@ -1,0 +1,21 @@
+[Unit]
+Description=parztream media server
+After=network.target
+
+[Service]
+Type=simple
+User=parztream
+Group=parztream
+WorkingDirectory=/opt/parztream
+EnvironmentFile=/etc/parztream/parztream.env
+# Single worker only: scan status/locking (app/scanner.py) is in-process
+# memory, not shared across processes -- multiple workers would let
+# concurrent scans race instead of correctly rejecting each other with 409.
+ExecStart=/opt/parztream/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

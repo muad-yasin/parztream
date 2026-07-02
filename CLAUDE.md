@@ -63,7 +63,10 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   module-level `threading.Lock` plus a `_scan_state` dict
   (`get_scan_status`/`start_scan`/`run_claimed_scan`) — `start_scan()`
   claims the lock synchronously so a second concurrent trigger fails
-  fast with 409 instead of racing.
+  fast with 409 instead of racing. This state is in-process memory,
+  so the app must always run as a single process/worker (see
+  `deploy/`) — multiple workers would each have their own lock and
+  could scan concurrently without ever seeing the 409.
 - `app/routers/library.py` — CRUD-ish read endpoints over the
   `media` table plus `POST /api/scan` (claims the scan lock, then
   hands the actual scan to FastAPI `BackgroundTasks` — returns
@@ -108,6 +111,15 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   `<video>` element at `/api/stream/{id}` on click, and polls
   `/api/scan/status` after triggering a scan (the trigger endpoint
   returns immediately, it doesn't wait for the scan to finish).
+- `deploy/` — templates for running as a persistent background
+  service (systemd unit + env-file template for Linux, a batch
+  script + env-file template for Windows), documented in the
+  README's "Running as a service" section. Not installed/enabled
+  anywhere by default — these are files to copy onto a target
+  machine, not something the app or its tests touch. Real env files
+  with actual passwords belong outside the repo (`/etc/parztream/`
+  or `C:\ProgramData\parztream\`), never committed — only the
+  `.example` templates live in `deploy/`.
 
 Test isolation relies on a quirk worth knowing: `config.py` reads env
 vars into module-level constants at import time, and `db.py`/
