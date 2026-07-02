@@ -1,6 +1,7 @@
 import mimetypes
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -15,7 +16,7 @@ RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 
 
 @router.get("/stream/{media_id}")
-def stream_media(media_id: int, request: Request):
+def stream_media(media_id: int, request: Request, original: bool = False):
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
     if row is None:
@@ -25,23 +26,36 @@ def stream_media(media_id: int, request: Request):
     if not original_path.is_file():
         raise HTTPException(status_code=404, detail="File missing on disk")
 
-    try:
-        path = resolve_playable_path(row)
-    except UnsupportedVideoCodec as exc:
-        raise HTTPException(
-            status_code=415,
-            detail=f"Video codec '{exc}' can't be played in a browser yet",
-        )
+    # ?original=1 bypasses the browser-compatibility check entirely and
+    # serves the source file's raw bytes -- the only way to get bytes at
+    # all for a codec resolve_playable_path can't fix (e.g. HEVC), meant
+    # for downloading to play in VLC/another device, not in-browser
+    # playback. Without this, "download instead" would 415 exactly like
+    # in-browser playback does, since it'd hit the same compatibility check.
+    if original:
+        path = original_path
+    else:
+        try:
+            path = resolve_playable_path(row)
+        except UnsupportedVideoCodec as exc:
+            raise HTTPException(
+                status_code=415,
+                detail=f"Video codec '{exc}' can't be played in a browser yet",
+            )
 
     file_size = path.stat().st_size
     content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+    base_headers = {"Accept-Ranges": "bytes"}
+    if original:
+        base_headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(path.name)}"
 
     range_header = request.headers.get("range")
     if range_header is None:
         return StreamingResponse(
             _iter_file(path, 0, file_size - 1),
             media_type=content_type,
-            headers={"Accept-Ranges": "bytes", "Content-Length": str(file_size)},
+            headers={**base_headers, "Content-Length": str(file_size)},
         )
 
     match = RANGE_RE.match(range_header)
@@ -70,8 +84,8 @@ def stream_media(media_id: int, request: Request):
         )
 
     headers = {
+        **base_headers,
         "Content-Range": f"bytes {start}-{end}/{file_size}",
-        "Accept-Ranges": "bytes",
         "Content-Length": str(end - start + 1),
     }
     return StreamingResponse(

@@ -133,7 +133,9 @@ async function playMedia(item) {
     msg.className = "player-message";
     msg.textContent = "This file's video format can't be played in the browser. ";
     const link = document.createElement("a");
-    link.href = streamUrl;
+    // ?original=1 bypasses the same compatibility check that just 415'd --
+    // without it this link would 415 too, since it hits the same endpoint.
+    link.href = `${streamUrl}?original=1`;
     link.textContent = "Download it instead";
     link.download = "";
     msg.appendChild(link);

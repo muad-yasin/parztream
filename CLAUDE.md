@@ -141,7 +141,18 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   Range support. `Content-Type` is derived via `mimetypes.guess_type()`
   on whichever path actually gets served — don't hardcode it,
   different containers need different MIME types for the browser to
-  play them at all.
+  play them at all. `?original=1` bypasses `resolve_playable_path`
+  entirely and serves the source file's raw bytes with
+  `Content-Disposition: attachment` (RFC 5987-encoded filename via
+  `urllib.parse.quote`, not a naive f-string into the header — avoids
+  header injection from unusual filenames). This exists because the
+  frontend's "download instead" link for a `415` hits this *same*
+  endpoint — without a bypass it would 415 too, since it'd re-run the
+  same compatibility check that just failed, leaving no way to get an
+  unsupported-codec file's bytes out of parztream at all. Found live
+  against a real 29GB HEVC file before this existed: in-browser
+  playback correctly blocked, but the "download instead" fallback was
+  actually broken.
 - `app/transcode.py` — `resolve_playable_path(row)` decides whether a
   video's original file can be played directly (mp4/webm container +
   h264/vp8/vp9/av1 video + aac/mp3/opus/vorbis audio, or no codec info
@@ -190,8 +201,10 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   `/api/stream/{id}` with a tiny `Range: bytes=0-1` request first —
   this both warms the transcode cache before real playback starts and
   lets a `415` (unsupported video codec) show a "download instead"
-  message rather than a silent `<video>` failure — before pointing an
-  `<audio>`/`<video>` element at the same URL, plus a `<track>` for
+  message (link uses `?original=1`, *not* the bare stream URL — see
+  `app/routers/stream.py`) rather than a silent `<video>` failure —
+  before pointing an `<audio>`/`<video>` element at the same URL,
+  plus a `<track>` for
   video pointed at `/api/library/{id}/subtitles` (no pre-check needed
   here — a 404 on a `<track src>` just gets ignored by the browser,
   unlike a `<video src>` 415). Also polls `/api/scan/status` after

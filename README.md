@@ -65,9 +65,12 @@ happens once per file. This needs `ffmpeg` on `PATH`.
 What this *doesn't* do: re-encode video. If the video codec itself
 isn't one a browser supports (e.g. HEVC), playback returns a clear
 "can't play in browser" message with a link to download the original
-file instead, rather than a full transcode — the video quality/
-resolution never changes, and a genuinely incompatible video codec
-stays incompatible.
+file instead (`/api/stream/{id}?original=1`, which always serves the
+untouched source file regardless of codec — that's what makes the
+download link actually work even though in-browser playback is
+blocked) — the video quality/resolution never changes, and a
+genuinely incompatible video codec stays incompatible for in-browser
+playback specifically, not unplayable everywhere.
 
 ## Configuration
 

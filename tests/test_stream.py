@@ -148,6 +148,70 @@ def test_unsupported_video_codec_returns_415(client, make_file):
     assert res.status_code == 415
 
 
+def test_original_param_bypasses_codec_check_so_downloads_still_work(client, make_file):
+    # The "download instead" fallback for an unsupported codec has to hit
+    # this same endpoint -- without ?original=1 bypassing the compatibility
+    # check, it would 415 exactly like in-browser playback just did, and
+    # there'd be no way to get the file's bytes out of parztream at all.
+    content = b"raw hevc bytes (not really, just test content)"
+    f = make_file("clip.mkv", content)
+    media_id = _insert_media(f, "video", video_codec="hevc", audio_codec="aac")
+
+    res = client.get(f"/api/stream/{media_id}", params={"original": "1"})
+
+    assert res.status_code == 200
+    assert res.content == content
+
+
+def test_original_param_sets_content_disposition_for_download(client, make_file):
+    f = make_file("My Movie.mkv", b"data")
+    media_id = _insert_media(f, "video", video_codec="hevc", audio_codec="aac")
+
+    res = client.get(f"/api/stream/{media_id}", params={"original": "1"})
+
+    assert 'attachment; filename*=UTF-8\'\'My%20Movie.mkv' == res.headers["content-disposition"]
+
+
+def test_original_param_supports_range_requests(client, make_file):
+    content = b"0123456789"
+    f = make_file("clip.mkv", content)
+    media_id = _insert_media(f, "video", video_codec="hevc", audio_codec="aac")
+
+    res = client.get(
+        f"/api/stream/{media_id}", params={"original": "1"}, headers={"Range": "bytes=2-4"}
+    )
+
+    assert res.status_code == 206
+    assert res.content == b"234"
+    assert res.headers["content-disposition"].startswith("attachment")
+
+
+def test_original_param_serves_source_file_not_remuxed_cache(client, make_file):
+    # For a file that WOULD normally get remuxed (compatible codecs, just
+    # needs a container fix), ?original=1 should still serve the untouched
+    # source bytes -- it's an unconditional bypass, not just for codecs
+    # resolve_playable_path can't fix.
+    content = b"raw mkv bytes"
+    f = make_file("clip.mkv", content)
+    media_id = _insert_media(f, "video", video_codec="h264", audio_codec="aac")
+
+    res = client.get(f"/api/stream/{media_id}", params={"original": "1"})
+
+    assert res.status_code == 200
+    assert res.content == content
+    assert res.headers["content-type"] == "video/x-matroska"
+
+
+def test_without_original_param_still_gets_415_as_before(client, make_file):
+    f = make_file("clip.mkv", b"data")
+    media_id = _insert_media(f, "video", video_codec="hevc", audio_codec="aac")
+
+    res = client.get(f"/api/stream/{media_id}")
+
+    assert res.status_code == 415
+    assert "content-disposition" not in res.headers
+
+
 def test_compatible_mp4_streams_directly_without_transcoding(client, make_file):
     content = b"x" * 1000
     f = make_file("clip.mp4", content)
