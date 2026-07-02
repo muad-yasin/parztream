@@ -22,13 +22,20 @@ pip install -r requirements.txt
 # Run the dev server (reload on change)
 export PARZTREAM_MEDIA_DIRS=/path/to/media   # : separated on Linux, ; on Windows
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# Tests
+pip install -r requirements-dev.txt
+pytest                       # whole suite
+pytest tests/test_stream.py  # one file
+pytest -k out_of_bounds      # by name
 ```
 
-There is no test suite, linter, or build step yet.
+There is no linter or build step yet.
 
-To sanity-check the backend after changes: start the server, then
-`curl http://127.0.0.1:8000/api/library` and
-`curl -X POST http://127.0.0.1:8000/api/scan`.
+Tests live in `tests/`, run against tmp-path DB/media dirs via an
+autouse fixture in `tests/conftest.py` (see below), never your real
+config. A couple of `test_scanner.py` cases need real audio and are
+skipped automatically when `ffmpeg` isn't on `PATH`.
 
 ## Architecture
 
@@ -79,6 +86,17 @@ To sanity-check the backend after changes: start the server, then
   `/api/stream/{id}` on click, and polls `/api/scan/status` after
   triggering a scan (the trigger endpoint returns immediately, it
   doesn't wait for the scan to finish).
+
+Test isolation relies on a quirk worth knowing: `config.py` reads env
+vars into module-level constants at import time, and `db.py`/
+`scanner.py`/`auth.py` import those by name (`from .config import
+DB_PATH`, etc.), so patching env vars after startup does nothing.
+`tests/conftest.py` instead monkeypatches the *consuming* module's
+attribute directly (e.g. `monkeypatch.setattr(db, "DB_PATH", ...)`,
+`monkeypatch.setattr(scanner, "MEDIA_DIRS", ...)`) — that works
+because each function looks up the name in its own module's globals
+at call time. If you add a new config value, follow the same pattern
+rather than trying to override the environment mid-test.
 
 ## Conventions
 

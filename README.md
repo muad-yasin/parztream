@@ -42,3 +42,15 @@ Set via environment variables:
   browse and stream. Recommended for anything beyond local testing.
 - `PARZTREAM_USERNAME` — Basic Auth username (defaults to
   `parztream`), only relevant when `PARZTREAM_PASSWORD` is set.
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Tests run against isolated tmp directories/databases (see
+`tests/conftest.py`), never your real media folders or DB. A couple
+of scanner tests that need real audio metadata are skipped
+automatically if `ffmpeg` isn't on `PATH`.
