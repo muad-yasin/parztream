@@ -27,8 +27,10 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 Open `http://<host>:8000/` from any device on the LAN. Click
 "Scan library" to (re)index the configured folders — scanning runs
 in the background, so the UI stays responsive while it works. The
-library list shows embedded cover art where available (mp3/FLAC/
-m4a/m4b) and is paginated 50 items at a time.
+library list shows thumbnails for every item — embedded cover art for
+audio (mp3/FLAC/m4a/m4b), an extracted video frame for video, both
+generated the first time they're requested and cached after — and is
+paginated 50 items at a time.
 
 ### TV show grouping
 
@@ -71,10 +73,12 @@ Set via environment variables:
   browse and stream. Recommended for anything beyond local testing.
 - `PARZTREAM_USERNAME` — Basic Auth username (defaults to
   `parztream`), only relevant when `PARZTREAM_PASSWORD` is set.
-- `PARZTREAM_CACHE_DIR` — where repackaged videos are cached (see
-  "Playback compatibility" above; defaults to `cache/` in the project
-  root). Grows roughly proportional to how much of your library needs
-  fixing up, since video is copied rather than re-encoded.
+- `PARZTREAM_CACHE_DIR` — where repackaged videos (see "Playback
+  compatibility" below) and generated video thumbnails are cached
+  (defaults to `cache/` in the project root). Grows roughly
+  proportional to how much of your library needs a container/audio
+  fix, since video is copied rather than re-encoded; thumbnails
+  themselves are small.
 - `PARZTREAM_CACHE_MAX_BYTES` — caps `PARZTREAM_CACHE_DIR`'s total
   size; once a new file pushes it over this limit, the oldest cached
   files are deleted to make room (the file just created is never

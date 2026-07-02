@@ -1,16 +1,30 @@
+import shutil
+import subprocess
+
+import pytest
+
 from app import scanner
 from app.db import get_connection
 
+requires_ffmpeg = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None, reason="ffmpeg not installed"
+)
 
-def _insert_media(path, media_type="audio", show_name=None, season_number=None, episode_number=None):
+
+def _insert_media(
+    path, media_type="audio", show_name=None, season_number=None, episode_number=None, duration=None
+):
     with get_connection() as conn:
         cur = conn.execute(
             """
             INSERT INTO media
-                (path, media_type, title, size_bytes, show_name, season_number, episode_number)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (path, media_type, title, size_bytes, show_name, season_number, episode_number, duration)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (str(path), media_type, path.stem, path.stat().st_size, show_name, season_number, episode_number),
+            (
+                str(path), media_type, path.stem, path.stat().st_size,
+                show_name, season_number, episode_number, duration,
+            ),
         )
         return cur.lastrowid
 
@@ -120,6 +134,38 @@ def test_art_endpoint_404s_when_file_has_no_embedded_artwork(client, make_file):
     res = client.get(f"/api/library/{media_id}/art")
 
     assert res.status_code == 404
+
+
+def test_art_endpoint_404s_for_video_with_no_extractable_thumbnail(client, make_file):
+    f = make_file("clip.mp4", b"not a real video file")
+    media_id = _insert_media(f, media_type="video", duration=10.0)
+
+    res = client.get(f"/api/library/{media_id}/art")
+
+    assert res.status_code == 404
+
+
+@requires_ffmpeg
+def test_art_endpoint_serves_a_real_video_thumbnail(client, make_file):
+    f = make_file("clip.mp4", b"")
+    f.unlink()
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=green:size=64x64:duration=2",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+            "-c:v", "libx264", "-c:a", "aac", "-shortest",
+            str(f),
+        ],
+        check=True,
+    )
+    media_id = _insert_media(f, media_type="video", duration=2.0)
+
+    res = client.get(f"/api/library/{media_id}/art")
+
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/jpeg"
+    assert res.content[:2] == b"\xff\xd8"
 
 
 def test_art_endpoint_404s_for_unknown_media(client):

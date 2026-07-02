@@ -2,9 +2,9 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 
-from ..artwork import get_cover_art
+from ..artwork import get_cover_art, get_video_thumbnail
 from ..db import get_connection
 from ..scanner import get_scan_status, run_claimed_scan, start_scan
 
@@ -87,12 +87,17 @@ def get_art(media_id: int):
     if not path.is_file():
         raise HTTPException(status_code=404, detail="File missing on disk")
 
-    art = get_cover_art(path, row["media_type"])
-    if art is None:
-        raise HTTPException(status_code=404, detail="No embedded artwork")
+    if row["media_type"] == "audio":
+        art = get_cover_art(path, row["media_type"])
+        if art is None:
+            raise HTTPException(status_code=404, detail="No embedded artwork")
+        data, mime = art
+        return Response(content=data, media_type=mime)
 
-    data, mime = art
-    return Response(content=data, media_type=mime)
+    thumb_path = get_video_thumbnail(row["id"], path, row["duration"])
+    if thumb_path is None:
+        raise HTTPException(status_code=404, detail="No thumbnail available")
+    return FileResponse(thumb_path, media_type="image/jpeg")
 
 
 @router.post("/scan")

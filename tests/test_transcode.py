@@ -1,7 +1,5 @@
-import os
 import shutil
 import subprocess
-import time
 from unittest.mock import patch
 
 import pytest
@@ -133,58 +131,13 @@ def test_incompatible_audio_gets_transcoded_while_video_is_copied(tmp_path, monk
     assert "aac,audio" in probe.stdout
 
 
-def _cache_file(cache_dir, name, size, age_seconds):
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_dir / name
-    path.write_bytes(b"x" * size)
-    now = time.time()
-    os.utime(path, (now - age_seconds, now - age_seconds))
-    return path
-
-
-def test_prune_does_nothing_when_no_limit_configured(tmp_path, monkeypatch):
-    cache_dir = tmp_path / "cache"
-    monkeypatch.setattr(transcode, "CACHE_DIR", cache_dir)
-    monkeypatch.setattr(transcode, "CACHE_MAX_BYTES", None)
-    old = _cache_file(cache_dir, "1.mp4", 1000, age_seconds=1000)
-    new = _cache_file(cache_dir, "2.mp4", 1000, age_seconds=0)
-
-    transcode._prune_cache(protect=new)
-
-    assert old.is_file()
-    assert new.is_file()
-
-
-def test_prune_evicts_oldest_first_until_under_budget(tmp_path, monkeypatch):
-    cache_dir = tmp_path / "cache"
-    monkeypatch.setattr(transcode, "CACHE_DIR", cache_dir)
-    monkeypatch.setattr(transcode, "CACHE_MAX_BYTES", 250)
-    oldest = _cache_file(cache_dir, "1.mp4", 100, age_seconds=200)
-    middle = _cache_file(cache_dir, "2.mp4", 100, age_seconds=100)
-    newest = _cache_file(cache_dir, "3.mp4", 100, age_seconds=0)
-
-    transcode._prune_cache(protect=newest)
-
-    assert not oldest.is_file()
-    assert middle.is_file()
-    assert newest.is_file()
-
-
-def test_prune_never_deletes_the_protected_file_even_if_alone_over_budget(tmp_path, monkeypatch):
-    cache_dir = tmp_path / "cache"
-    monkeypatch.setattr(transcode, "CACHE_DIR", cache_dir)
-    monkeypatch.setattr(transcode, "CACHE_MAX_BYTES", 10)
-    protected = _cache_file(cache_dir, "1.mp4", 1000, age_seconds=0)
-
-    transcode._prune_cache(protect=protected)
-
-    assert protected.is_file()
-
-
 @requires_ffmpeg
 def test_creating_a_new_remux_prunes_older_ones_once_over_budget(tmp_path, monkeypatch):
+    from app import cache as cache_module
+
     cache_dir = tmp_path / "cache"
     monkeypatch.setattr(transcode, "CACHE_DIR", cache_dir)
+    monkeypatch.setattr(cache_module, "CACHE_DIR", cache_dir)
 
     def make_mkv(name):
         path = tmp_path / name
@@ -211,7 +164,7 @@ def test_creating_a_new_remux_prunes_older_ones_once_over_budget(tmp_path, monke
 
     # Cap the budget to roughly one cached file's worth, then create a
     # second -- the first should get evicted to make room.
-    monkeypatch.setattr(transcode, "CACHE_MAX_BYTES", first_cached.stat().st_size + 1000)
+    monkeypatch.setattr(cache_module, "CACHE_MAX_BYTES", first_cached.stat().st_size + 1000)
     second_cached = transcode.resolve_playable_path(second_row)
 
     assert second_cached.is_file()

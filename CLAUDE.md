@@ -93,16 +93,25 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   (grouped/aggregated via `GROUP BY show_name`, and the number of
   distinct shows is inherently much smaller than the episode count —
   pagination would be overkill there). `GET /api/library/{id}/art`
-  serves embedded cover art (extracted on-demand via `app/artwork.py`,
-  not cached anywhere), 404s if the file has none.
-- `app/artwork.py` — pulls embedded cover art out of audio files
-  (ID3 `APIC` for mp3, `covr` for MP4-family containers, FLAC
-  `pictures`) via `mutagen`, re-reading the file fresh on every
-  request rather than caching — simplest option, and no place yet
-  where that's shown to be a bottleneck. Video thumbnails
-  (would need decoding a frame via `ffmpeg`) aren't implemented;
-  `get_cover_art` returns `None` immediately for `media_type ==
-  "video"`.
+  serves art: `get_cover_art` (audio, uncached) or
+  `get_video_thumbnail` (video, cached — see below), 404s if neither
+  finds anything.
+- `app/artwork.py` — two independent functions, kept separate rather
+  than unified because their cost profiles are opposite. `get_cover_art`
+  pulls embedded art out of audio files (ID3 `APIC` for mp3, `covr`
+  for MP4-family containers, FLAC `pictures`) via `mutagen`, re-reading
+  the file fresh on every request -- cheap (just tag parsing), so
+  there's no reason to cache it. `get_video_thumbnail` grabs a real
+  frame via `ffmpeg` (seeking to `min(10s, 10% of duration)`, since
+  frame 0 is often a black/blank intro) — genuinely expensive compared
+  to tag-reading, so unlike cover art it *is* cached, to
+  `CACHE_DIR/{id}_thumb.jpg`, sharing the same cache directory and
+  pruning as `app/transcode.py`'s remuxed videos.
+- `app/cache.py` — `prune(protect)`, extracted out of
+  `app/transcode.py` once `app/artwork.py`'s video thumbnails became
+  a second thing writing into `CACHE_DIR` — both now share one budget
+  rather than each tracking their own. Same protect-the-just-created-
+  file behavior as before extraction.
 - `app/routers/stream.py` — calls `transcode.resolve_playable_path(row)`
   to get the path to actually serve (original or cached remux; a
   `UnsupportedVideoCodec` becomes a `415`), then serves file bytes
@@ -135,14 +144,10 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   one case that can take noticeably longer. The frontend's `playMedia`
   absorbs this by probing with a tiny ranged request before handing
   the URL to `<video>`/`<audio>`, so the cache is already warm by the
-  time real playback starts. Cache eviction (`_prune_cache`) runs
-  right after a new file is written, if `CACHE_MAX_BYTES` is set:
-  oldest-by-mtime files are deleted until back under budget. It
-  always excludes the file that was *just* created from eviction —
-  without that, a single cache miss on a small `CACHE_MAX_BYTES`
-  could delete the very file the current request is about to serve.
-  An evicted file isn't a loss, just a cache miss on next play (cheap
-  to re-derive, unlike the original scan metadata).
+  time real playback starts. Calls `cache.prune()` right after writing
+  a new file (see `app/cache.py`) — an evicted file isn't a loss, just
+  a cache miss on next play (cheap to re-derive, unlike the original
+  scan metadata).
 - `app/auth.py` — `BasicAuthMiddleware`, a pure ASGI middleware (not
   `BaseHTTPMiddleware`, which buffers `StreamingResponse` bodies —
   that would hurt streaming large files). Gates the entire app,
@@ -184,10 +189,13 @@ vars into module-level constants at import time, and `db.py`/
 DB_PATH`, etc.), so patching env vars after startup does nothing.
 `tests/conftest.py` instead monkeypatches the *consuming* module's
 attribute directly (e.g. `monkeypatch.setattr(db, "DB_PATH", ...)`,
-`monkeypatch.setattr(scanner, "MEDIA_DIRS", ...)`,
-`monkeypatch.setattr(transcode, "CACHE_DIR", ...)`) — that works
+`monkeypatch.setattr(scanner, "MEDIA_DIRS", ...)`) — that works
 because each function looks up the name in its own module's globals
-at call time. If you add a new config value, follow the same pattern
+at call time. `CACHE_DIR` in particular is imported separately by
+*three* modules (`transcode.py`, `artwork.py`, `cache.py`), all of
+which need patching to the same tmp path for a test to see one
+consistent cache dir — `isolated_app_state` does all three. If you
+add a new config value, follow the same pattern
 rather than trying to override the environment mid-test.
 
 ## Conventions
