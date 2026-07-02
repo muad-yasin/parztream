@@ -50,7 +50,8 @@ jobs:
               apt-get update &&
               apt-get install -y --no-install-recommends binutils &&
               pip install -r requirements-build.txt &&
-              pyinstaller packaging/linux/parztream.spec --distpath dist --workpath build --noconfirm
+              pyinstaller packaging/linux/parztream.spec --distpath dist --workpath build --noconfirm &&
+              chown -R $(id -u):$(id -g) dist build
             "
 
       - name: Assemble the AppDir
