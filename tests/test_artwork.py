@@ -1,5 +1,9 @@
 import shutil
 import subprocess
+import threading
+import time
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -98,9 +102,43 @@ def test_get_video_thumbnail_extracts_and_caches_a_real_frame(tmp_path, monkeypa
     assert thumb_path.read_bytes()[:2] == b"\xff\xd8"  # JPEG magic bytes
 
     # Second call should reuse the cached file, not re-invoke ffmpeg.
-    from unittest.mock import patch
-
     with patch("subprocess.run") as mock_run:
         cached = artwork.get_video_thumbnail(99, video_path, duration=2.0)
     assert cached == thumb_path
     mock_run.assert_not_called()
+
+
+def test_concurrent_requests_for_the_same_uncached_thumbnail_only_invoke_ffmpeg_once(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(artwork, "CACHE_DIR", tmp_path / "cache")
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"source bytes")
+
+    call_count = 0
+    call_count_lock = threading.Lock()
+
+    def fake_run(cmd, **kwargs):
+        nonlocal call_count
+        with call_count_lock:
+            call_count += 1
+        time.sleep(0.1)  # widen the race window so the bug would reproduce
+        Path(cmd[-1]).write_bytes(b"fake jpeg output")
+        return MagicMock(returncode=0)
+
+    results = []
+    with patch("subprocess.run", side_effect=fake_run):
+        threads = [
+            threading.Thread(
+                target=lambda: results.append(artwork.get_video_thumbnail(42, video_path, 10.0))
+            )
+            for _ in range(8)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    assert call_count == 1
+    assert len(results) == 8
+    assert all(r == results[0] for r in results)

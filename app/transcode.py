@@ -52,21 +52,27 @@ def _get_or_create_remux(media_id: int, src_path: Path, remux_audio: bool) -> Pa
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_path = CACHE_DIR / f"{media_id}.mp4"
 
-    if cache_path.is_file() and cache_path.stat().st_mtime >= src_path.stat().st_mtime:
-        return cache_path
+    # Serialize on this specific output path: without this, concurrent
+    # requests for the same not-yet-cached video (e.g. two devices hitting
+    # play around the same time) each spawn their own ffmpeg process
+    # writing to the identical file -- confirmed live to serve genuinely
+    # different byte content to different clients, not just wasted work.
+    with cache.lock_for(str(cache_path)):
+        if cache_path.is_file() and cache_path.stat().st_mtime >= src_path.stat().st_mtime:
+            return cache_path
 
-    audio_args = ["-c:a", "aac"] if remux_audio else ["-c:a", "copy"]
-    subprocess.run(
-        [
-            "ffmpeg", "-y", "-v", "error",
-            "-i", str(src_path),
-            "-c:v", "copy", *audio_args,
-            "-movflags", "+faststart",
-            "-f", "mp4",
-            str(cache_path),
-        ],
-        check=True,
-        timeout=600,
-    )
-    cache.prune(protect=cache_path)
-    return cache_path
+        audio_args = ["-c:a", "aac"] if remux_audio else ["-c:a", "copy"]
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-v", "error",
+                "-i", str(src_path),
+                "-c:v", "copy", *audio_args,
+                "-movflags", "+faststart",
+                "-f", "mp4",
+                str(cache_path),
+            ],
+            check=True,
+            timeout=600,
+        )
+        cache.prune(protect=cache_path)
+        return cache_path

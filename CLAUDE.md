@@ -55,12 +55,22 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   table, `media`. No migrations system yet — schema changes mean
   editing `SCHEMA` in this file (existing dev DBs need to be deleted
   and rescanned).
-- `app/scanner.py` — walks `MEDIA_DIRS`, classifies files as
-  audio/video by extension, extracts metadata (`mutagen` for audio
-  tags; a single `ffprobe -show_entries format=duration:stream=...`
-  JSON call for video duration *and* the first video/audio stream's
-  codec name, stored as `video_codec`/`audio_codec` — both degrade
-  gracefully to `None`/filename if ffprobe is unavailable; a regex,
+- `app/scanner.py` — walks `MEDIA_DIRS` via `os.walk(..., followlinks=False)`
+  (not `Path.rglob`, deliberately: a plain glob would follow symlinks),
+  and explicitly skips any entry where `path.is_symlink()` is true.
+  Confirmed live before this existed: a symlink named e.g. `song.mp3`
+  inside a scanned folder, pointing anywhere on disk, got scanned and
+  fully served through the streaming endpoint regardless of what it
+  actually pointed to. Don't reintroduce `rglob`/`glob` here without
+  re-adding an equivalent symlink check — both the file-level check and
+  `followlinks=False` are load-bearing, not redundant (one blocks
+  symlinked *files*, the other blocks descending into symlinked
+  *directories*). Classifies files as audio/video by extension,
+  extracts metadata (`mutagen` for audio tags; a single `ffprobe
+  -show_entries format=duration:stream=...` JSON call for video
+  duration *and* the first video/audio stream's codec name, stored as
+  `video_codec`/`audio_codec` — both degrade gracefully to
+  `None`/filename if ffprobe is unavailable; a regex,
   `_parse_show_episode`, against the filename stem for `show_name`/
   `season_number`/`episode_number` — only recognizes the "Show Name
   S01E02" convention, anything else stays ungrouped rather than
@@ -114,12 +124,34 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   frame 0 is often a black/blank intro) — genuinely expensive compared
   to tag-reading, so unlike cover art it *is* cached, to
   `CACHE_DIR/{id}_thumb.jpg`, sharing the same cache directory and
-  pruning as `app/transcode.py`'s remuxed videos.
+  pruning as `app/transcode.py`'s remuxed videos. Its whole body runs
+  inside `cache.lock_for(str(thumb_path))` for the same reason
+  `_get_or_create_remux` does — see `app/cache.py`.
 - `app/cache.py` — `prune(protect)`, extracted out of
   `app/transcode.py` once `app/artwork.py`'s video thumbnails became
   a second thing writing into `CACHE_DIR` — both now share one budget
   rather than each tracking their own. Same protect-the-just-created-
-  file behavior as before extraction.
+  file behavior as before extraction. Tolerant of files disappearing
+  mid-run (`FileNotFoundError` on `.stat()` during listing is caught;
+  `.unlink()` uses `missing_ok=True`) — two different resources finishing
+  and pruning around the same time, each unaware of the other, is a real
+  scenario, not a hypothetical one, now that cache creation is locked
+  per-resource (see `lock_for` below) rather than globally.
+  `lock_for(key)` returns a `threading.Lock` for a given key (a cache
+  path, as a string), creating one on first use and never removing it.
+  `app/transcode.py`'s `_get_or_create_remux` and `app/artwork.py`'s
+  `get_video_thumbnail` each wrap their *entire* check-cache/create-if-
+  missing body in `with cache.lock_for(str(output_path)):`. This closes
+  a confirmed live bug: without it, concurrent requests for the same
+  not-yet-cached resource (e.g. two devices pressing play around the
+  same time) each spawned their own `ffmpeg` process racing to write the
+  identical output path, and different clients received measurably
+  different byte content (different checksums) for what should have
+  been one canonical file — not just wasted CPU, an actual correctness
+  bug. `tests/test_transcode.py`/`test_artwork.py` have a regression
+  test for this using real `threading` (not mocks pretending to be
+  concurrent) that fails with `call_count == 8` if the lock is removed —
+  keep that test if you ever touch this locking.
 - `app/subtitles.py` — looks for a same-stem `.vtt`/`.srt` sidecar
   file next to the video (`find_subtitle_path`; `.vtt` preferred, no
   conversion needed). `.srt` gets converted to WebVTT via a regex

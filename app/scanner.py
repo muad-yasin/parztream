@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 import threading
@@ -47,18 +48,25 @@ def scan_media_dirs():
         for media_dir in MEDIA_DIRS:
             if not media_dir.is_dir():
                 continue
-            for path in media_dir.rglob("*"):
-                if not path.is_file():
-                    continue
-                ext = path.suffix.lower()
-                if ext in AUDIO_EXTENSIONS:
-                    media_type = "audio"
-                elif ext in VIDEO_EXTENSIONS:
-                    media_type = "video"
-                else:
-                    continue
-                found_paths.add(str(path))
-                _upsert_media(conn, path, media_type)
+            # followlinks=False: don't descend into symlinked subdirectories,
+            # and individual symlinked files are skipped below -- otherwise a
+            # symlink placed inside a scanned folder (even one named
+            # "song.mp3") could point anywhere on disk and get scanned,
+            # indexed, and served as if it were a real media file.
+            for root, _dirnames, filenames in os.walk(media_dir, followlinks=False):
+                for filename in filenames:
+                    path = Path(root) / filename
+                    if path.is_symlink() or not path.is_file():
+                        continue
+                    ext = path.suffix.lower()
+                    if ext in AUDIO_EXTENSIONS:
+                        media_type = "audio"
+                    elif ext in VIDEO_EXTENSIONS:
+                        media_type = "video"
+                    else:
+                        continue
+                    found_paths.add(str(path))
+                    _upsert_media(conn, path, media_type)
 
         _remove_missing(conn, found_paths)
 

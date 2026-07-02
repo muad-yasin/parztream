@@ -90,6 +90,41 @@ def test_ignores_configured_dir_that_does_not_exist(monkeypatch, tmp_path):
     assert _rows() == []
 
 
+def test_symlinked_file_is_not_scanned(media_dir, tmp_path, monkeypatch):
+    # A symlink inside a scanned dir could point anywhere on disk regardless
+    # of its own filename -- must never be scanned/served, even if it looks
+    # like an ordinary media file.
+    secret = tmp_path / "secret.txt"
+    secret.write_text("should never be exposed")
+    (media_dir / "innocent_song.mp3").symlink_to(secret)
+
+    scanner.scan_media_dirs()
+
+    assert _rows() == []
+
+
+def test_symlinked_directory_is_not_traversed(media_dir, tmp_path, monkeypatch):
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "secret.mp3").write_bytes(b"data")
+    (media_dir / "linked_dir").symlink_to(outside_dir, target_is_directory=True)
+
+    scanner.scan_media_dirs()
+
+    assert _rows() == []
+
+
+def test_real_file_alongside_a_symlink_is_still_scanned(media_dir, make_file, tmp_path, monkeypatch):
+    make_file("real_song.mp3")
+    (media_dir / "symlinked_song.mp3").symlink_to(tmp_path / "does-not-matter.mp3")
+
+    scanner.scan_media_dirs()
+
+    rows = _rows()
+    assert len(rows) == 1
+    assert rows[0]["path"].endswith("real_song.mp3")
+
+
 def test_first_tag_falls_back_on_missing_or_malformed_values():
     assert scanner._first_tag({"title": ["Real Title"]}, "title", "fallback") == "Real Title"
     assert scanner._first_tag({}, "title", "fallback") == "fallback"

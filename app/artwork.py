@@ -52,31 +52,35 @@ def get_video_thumbnail(media_id: int, path: Path, duration):
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     thumb_path = CACHE_DIR / f"{media_id}_thumb.jpg"
 
-    if thumb_path.is_file() and thumb_path.stat().st_mtime >= path.stat().st_mtime:
+    # Same reasoning as app/transcode.py's remux lock: without this,
+    # concurrent requests for the same not-yet-cached thumbnail would each
+    # spawn their own ffmpeg process racing to write the same output file.
+    with cache.lock_for(str(thumb_path)):
+        if thumb_path.is_file() and thumb_path.stat().st_mtime >= path.stat().st_mtime:
+            return thumb_path
+
+        # A frame a little into the video reads better than frame 0, which is
+        # often a black/blank intro; 10% in (capped at 10s) is a cheap
+        # heuristic, not an attempt at a "best" thumbnail.
+        seek = min(10.0, duration * 0.1) if duration else 0.0
+
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-v", "error",
+                    "-ss", str(seek), "-i", str(path),
+                    "-frames:v", "1", "-vf", "scale=320:-1",
+                    "-q:v", "4",
+                    str(thumb_path),
+                ],
+                check=True,
+                timeout=30,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError):
+            return None
+
+        if not thumb_path.is_file():
+            return None
+
+        cache.prune(protect=thumb_path)
         return thumb_path
-
-    # A frame a little into the video reads better than frame 0, which is
-    # often a black/blank intro; 10% in (capped at 10s) is a cheap heuristic,
-    # not an attempt at a "best" thumbnail.
-    seek = min(10.0, duration * 0.1) if duration else 0.0
-
-    try:
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-v", "error",
-                "-ss", str(seek), "-i", str(path),
-                "-frames:v", "1", "-vf", "scale=320:-1",
-                "-q:v", "4",
-                str(thumb_path),
-            ],
-            check=True,
-            timeout=30,
-        )
-    except (FileNotFoundError, subprocess.SubprocessError):
-        return None
-
-    if not thumb_path.is_file():
-        return None
-
-    cache.prune(protect=thumb_path)
-    return thumb_path

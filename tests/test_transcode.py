@@ -1,6 +1,9 @@
 import shutil
 import subprocess
-from unittest.mock import patch
+import threading
+import time
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -169,3 +172,42 @@ def test_creating_a_new_remux_prunes_older_ones_once_over_budget(tmp_path, monke
 
     assert second_cached.is_file()
     assert not first_cached.is_file()
+
+
+def test_concurrent_requests_for_the_same_uncached_video_only_invoke_ffmpeg_once(tmp_path, monkeypatch):
+    # Regression test for a race confirmed live: N concurrent requests for
+    # the same not-yet-cached video each spawned their own ffmpeg process
+    # racing to write the identical output path, and different clients
+    # ended up with genuinely different byte content (different checksums)
+    # for what should have been one canonical file.
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"source bytes")
+    row = _row(id=99, path=str(f), video_codec="h264", audio_codec="ac3")
+
+    call_count = 0
+    call_count_lock = threading.Lock()
+
+    def fake_run(cmd, **kwargs):
+        nonlocal call_count
+        with call_count_lock:
+            call_count += 1
+        time.sleep(0.1)  # widen the race window so the bug would reproduce
+        Path(cmd[-1]).write_bytes(b"fake remuxed output")
+        return MagicMock(returncode=0)
+
+    results = []
+    with patch("subprocess.run", side_effect=fake_run):
+        threads = [
+            threading.Thread(target=lambda: results.append(transcode.resolve_playable_path(row)))
+            for _ in range(8)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    assert call_count == 1
+    assert len(results) == 8
+    assert all(r == results[0] for r in results)

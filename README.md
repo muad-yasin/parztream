@@ -17,6 +17,14 @@ Video duration lookups use `ffprobe` (from ffmpeg) if it's on your
 `PATH`; it's optional — video files still work without it, just
 without a known duration.
 
+Scanning skips symlinks entirely — neither symlinked files nor
+symlinked subdirectories are followed. This is deliberate: a symlink
+inside a scanned folder can point anywhere on disk regardless of its
+own filename, so following them would let anything writable into
+`PARZTREAM_MEDIA_DIRS` (a compromised download client, another OS
+account with folder access, plain misconfiguration) expose arbitrary
+files on the server through the streaming/download endpoints.
+
 ## Running
 
 ```bash
