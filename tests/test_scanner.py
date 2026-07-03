@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -36,7 +37,7 @@ def test_classifies_by_extension_and_ignores_unknown_files(make_file, monkeypatc
     monkeypatch.setattr(
         scanner,
         "_extract_metadata",
-        lambda path, media_type: _metadata(title=path.stem, artist="Artist", album="Album", duration=42.0),
+        lambda path, media_type, *a, **kw: _metadata(title=path.stem, artist="Artist", album="Album", duration=42.0),
     )
     make_file("song.mp3")
     make_file("audiobook.m4b")
@@ -57,7 +58,7 @@ def test_classifies_by_extension_and_ignores_unknown_files(make_file, monkeypatc
 def test_rescanning_updates_existing_row_instead_of_duplicating(make_file, monkeypatch):
     calls = {"n": 0}
 
-    def fake_extract(path, media_type):
+    def fake_extract(path, media_type, *args, **kwargs):
         calls["n"] += 1
         return _metadata(title=f"Title {calls['n']}")
 
@@ -73,7 +74,7 @@ def test_rescanning_updates_existing_row_instead_of_duplicating(make_file, monke
 
 
 def test_scan_removes_rows_for_files_deleted_from_disk(make_file, monkeypatch):
-    monkeypatch.setattr(scanner, "_extract_metadata", lambda p, t: _metadata(title=p.stem))
+    monkeypatch.setattr(scanner, "_extract_metadata", lambda p, t, *a, **kw: _metadata(title=p.stem))
     f = make_file("song.mp3")
     scanner.scan_media_dirs()
     assert len(_rows()) == 1
@@ -161,6 +162,192 @@ def test_scan_populates_show_fields_for_episode_style_filenames(make_file, monke
     assert rows["The Chosen S01E02.mp4"]["season_number"] == 1
     assert rows["The Chosen S01E02.mp4"]["episode_number"] == 2
     assert rows["random_clip.mp4"]["show_name"] is None
+
+
+@pytest.mark.parametrize(
+    "path,root,expected",
+    [
+        (
+            "/media/TV/Breaking Bad/Season 1/Breaking Bad - S01E01 - Pilot.mkv",
+            "/media/TV", ("Breaking Bad", 1, 1),
+        ),
+        (
+            "/media/TV/Better Call Saul/Season 01/01 - Uno.mkv",
+            "/media/TV", ("Better Call Saul", 1, 1),
+        ),
+        (
+            "/media/TV/Show/Season 2/Episode 3.mkv",
+            "/media/TV", ("Show", 2, 3),
+        ),
+        # Folder season wins over a conflicting season in the filename.
+        (
+            "/media/TV/Show/season 2/S01E05 - Title.mkv",
+            "/media/TV", ("Show", 2, 5),
+        ),
+        (
+            "/media/TV/Show/S2/07.mkv",
+            "/media/TV", ("Show", 2, 7),
+        ),
+        # Trailing junk in the season folder name -> reject.
+        (
+            "/media/TV/Show/Season 1 (2013)/ep.mkv",
+            "/media/TV", (None, None, None),
+        ),
+        # Not a season folder at all.
+        (
+            "/media/TV/Show/Extras/Bonus.mkv",
+            "/media/TV", (None, None, None),
+        ),
+        # Season folder directly under the library root -- no show folder.
+        (
+            "/media/TV/Season 1/01 - Something.mkv",
+            "/media/TV", (None, None, None),
+        ),
+        # No episode marker in the filename at all.
+        (
+            "/media/TV/Show/Season 1/Pilot.mkv",
+            "/media/TV", (None, None, None),
+        ),
+        # A 4-digit "year" filename must never be read as an episode number.
+        (
+            "/media/TV/Show/Season 1/1984.mkv",
+            "/media/TV", (None, None, None),
+        ),
+        # Season 00 (specials) is a legitimate season number.
+        (
+            "/media/TV/Show/Season 00/S00E01 - Recap.mkv",
+            "/media/TV", ("Show", 0, 1),
+        ),
+    ],
+)
+def test_parse_folder_show_episode(path, root, expected):
+    assert scanner._parse_folder_show_episode(Path(path), Path(root)) == expected
+
+
+@pytest.mark.parametrize(
+    "stem,is_trailer",
+    [
+        ("trailer", True),
+        ("sample", True),
+        ("Inception-trailer", True),
+        ("Inception.trailer", True),
+        ("Inception (Trailer)", True),
+        ("sample1", True),
+        ("Trailer-2", True),
+        ("samples", True),
+        # "trailer" appears but isn't the trailing token -- a real title.
+        ("Trailer Park Boys", False),
+        ("Inception", False),
+    ],
+)
+def test_trailer_sample_regex(stem, is_trailer):
+    assert bool(scanner._TRAILER_SAMPLE_RE.search(stem)) is is_trailer
+
+
+def test_scan_populates_show_fields_from_season_folder_structure(make_file, monkeypatch):
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path: (None, "h264", "aac"))
+    make_file("TV/Breaking Bad/Season 1/Breaking Bad - S01E01 - Pilot.mkv")
+
+    scanner.scan_media_dirs()
+
+    row = _rows()[0]
+    assert row["show_name"] == "Breaking Bad"
+    assert row["season_number"] == 1
+    assert row["episode_number"] == 1
+
+
+def test_scan_leading_number_episode_style_under_season_folder(make_file, monkeypatch):
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path: (None, "h264", "aac"))
+    make_file("TV/Better Call Saul/Season 01/01 - Uno.mkv")
+
+    scanner.scan_media_dirs()
+
+    row = _rows()[0]
+    assert row["show_name"] == "Better Call Saul"
+    assert row["season_number"] == 1
+    assert row["episode_number"] == 1
+
+
+def test_scan_flat_filename_style_is_unaffected_by_folder_feature(make_file, monkeypatch):
+    # Regression: a plain "Show S01E02" filename directly in the scanned
+    # root (no season subfolder at all) must keep resolving via the
+    # existing filename-only regex, unchanged.
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path: (None, "h264", "aac"))
+    make_file("Old Show S01E02.mkv")
+
+    scanner.scan_media_dirs()
+
+    row = _rows()[0]
+    assert row["show_name"] == "Old Show"
+    assert row["season_number"] == 1
+    assert row["episode_number"] == 2
+
+
+def test_scan_derives_movie_title_from_folder_name(make_file, monkeypatch):
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path: (None, "h264", "aac"))
+    make_file("Movies/Inception (2010)/Inception.2010.1080p.BluRay.x264-GROUP.mkv")
+
+    scanner.scan_media_dirs()
+
+    row = _rows()[0]
+    assert row["title"] == "Inception (2010)"
+    assert row["show_name"] is None
+
+
+def test_scan_leaves_ambiguous_multi_video_folder_titles_alone(make_file, monkeypatch):
+    # Two real videos, no season structure -- can't tell which "is" the
+    # movie, so filenames keep their existing titles.
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path: (None, "h264", "aac"))
+    make_file("Movies/Double Feature/Movie One.mkv")
+    make_file("Movies/Double Feature/Movie Two.mkv")
+
+    scanner.scan_media_dirs()
+
+    rows = {r["title"] for r in _rows()}
+    assert rows == {"Movie One", "Movie Two"}
+
+
+def test_scan_excludes_trailer_files_from_the_library(make_file, monkeypatch):
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path: (None, "h264", "aac"))
+    make_file("Movies/Inception (2010)/Inception.mkv")
+    make_file("Movies/Inception (2010)/Inception-trailer.mkv")
+
+    scanner.scan_media_dirs()
+
+    rows = _rows()
+    assert len(rows) == 1
+    assert Path(rows[0]["path"]).name == "Inception.mkv"
+    # The lone real video (trailer excluded from the count) still gets the
+    # folder-derived title.
+    assert rows[0]["title"] == "Inception (2010)"
+
+
+def test_scan_removes_previously_scanned_file_once_renamed_to_look_like_a_trailer(make_file, monkeypatch):
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path: (None, "h264", "aac"))
+    f = make_file("Movies/Inception (2010)/Inception.mkv")
+    scanner.scan_media_dirs()
+    assert len(_rows()) == 1
+
+    renamed = f.parent / "Inception-trailer.mkv"
+    f.rename(renamed)
+    scanner.scan_media_dirs()
+
+    assert _rows() == []
+
+
+def test_scan_does_not_retitle_a_season_folder_with_only_one_episode_so_far(make_file, monkeypatch):
+    # A season folder with just one ripped episode also happens to be "a
+    # folder with exactly one real video and no season subfolders inside
+    # it" -- must not be mistaken for a movie folder and retitled to the
+    # season folder's own name.
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path: (None, "h264", "aac"))
+    make_file("TV/Breaking Bad/Season 3/Breaking Bad - S03E01 - No Mas.mkv")
+
+    scanner.scan_media_dirs()
+
+    row = _rows()[0]
+    assert row["show_name"] == "Breaking Bad"
+    assert row["title"] != "Season 3"
 
 
 @requires_ffmpeg

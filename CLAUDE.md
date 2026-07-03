@@ -89,17 +89,76 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   -show_entries format=duration:stream=...` JSON call for video
   duration *and* the first video/audio stream's codec name, stored as
   `video_codec`/`audio_codec` — both degrade gracefully to
-  `None`/filename if ffprobe is unavailable; a regex,
-  `_parse_show_episode`, against the filename stem for `show_name`/
-  `season_number`/`episode_number` — only recognizes the "Show Name
-  S01E02" convention, anything else stays ungrouped rather than
-  guessing), and upserts into `media` by path. Also deletes DB rows
-  for files no longer found on disk. This is the only place
-  file-metadata extraction happens. `_extract_metadata` returns a
-  dict, not a positional tuple — it kept growing fields (this is its
-  3rd extension) and a dict is far less fragile to extend/mock in
-  tests than a positional tuple; follow that pattern rather than
-  reverting to positional if you add another field.
+  `None`/filename if ffprobe is unavailable), and upserts into `media`
+  by path. Also deletes DB rows for files no longer found on disk.
+  This is the only place file-metadata extraction happens.
+  `_extract_metadata` returns a dict, not a positional tuple — it kept
+  growing fields (this is its 3rd extension) and a dict is far less
+  fragile to extend/mock in tests than a positional tuple; follow that
+  pattern rather than reverting to positional if you add another
+  field.
+  `show_name`/`season_number`/`episode_number` come from two layered
+  heuristics, tried in this order, never mixed: (1) **folder-based**,
+  `_parse_folder_show_episode` — recognizes the Plex/Jellyfin
+  convention `<Show>/<Season Folder>/<episode file>` by checking
+  *only* `path.parent` against `_SEASON_FOLDER_RE` (full match:
+  "Season 1", "Season 01", "S01", "S1", "Season 00" for specials;
+  trailing junk like "Season 1 (2013)" is rejected). If it matches,
+  the show name is `path.parent.parent.name`, the season comes from
+  the folder, and the episode number comes from the filename via
+  `_parse_episode_in_stem` (tries an `S##E##` tag anywhere in the
+  name, then a leading "Episode N", then a bare leading number like
+  "01 - Uno.mkv" — a 4-digit filename like `1984.mkv` can never match
+  as an episode number, since `\d{1,3}` plus the required trailing
+  separator/end-of-string can't consume all 4 digits). A season
+  folder sitting directly under a configured library root (no real
+  show folder above it) is deliberately rejected rather than using the
+  library root's own name ("TV", "Media") as the show. Only ever
+  checks the immediate parent, so an `Extras` folder nested inside a
+  season folder is correctly left ungrouped, not misread as an
+  episode. If the filename's own season marker disagrees with the
+  folder's (e.g. `S01E01.mkv` sitting in a `Season 2` folder), **the
+  folder wins** for the season number — only the episode digits are
+  taken from the filename. (2) **Filename-only fallback**, the
+  original `_parse_show_episode` against the filename stem — only
+  recognizes the "Show Name S01E02" convention, anything else stays
+  ungrouped rather than guessing. This is what still handles flat
+  libraries with no season subfolders at all, completely unchanged.
+  Movie titles also get a folder-based improvement, decided per
+  directory in `scan_media_dirs` *before* iterating files in it: if a
+  directory has no season-named subdirectory and, after excluding
+  trailer/sample files (see below), contains exactly one real video,
+  that video's `title` becomes the containing folder's name instead of
+  its (often messy, scene-release-style) filename — e.g.
+  `Inception (2010)/Inception.2010.1080p.BluRay.x264-GROUP.mkv` titles
+  as "Inception (2010)". This only ever applies to a file that didn't
+  already resolve to a show via either heuristic above — a season
+  folder with only one episode ripped so far also technically looks
+  like "one real video, no season subfolder inside it," but since its
+  show/season/episode are already resolved before this check runs, it
+  is never mistaken for a movie folder and retitled to the season
+  folder's own name. A folder with 2+ real videos and no season
+  structure is left ambiguous on purpose (existing filenames keep
+  their titles) rather than guessing which one "is" the movie.
+  Video files named to look like a trailer or sample clip —
+  `_TRAILER_SAMPLE_RE`, matching when "trailer"/"sample" (optionally
+  pluralized or suffixed with digits/punctuation: "trailer1",
+  "Inception-trailer", "samples") is the *trailing* token of the
+  filename stem — are excluded from the library entirely, not just
+  from the movie-folder video count. End-anchored deliberately, not a
+  substring search, so a real title like `"Trailer Park Boys.mkv"`
+  isn't falsely excluded (trailer isn't the trailing word there).
+  **Behavior note**: a file previously in the library that matches
+  this pattern (e.g. it gets renamed to end in "-trailer") disappears
+  from the library on the next scan — the file itself is untouched on
+  disk, it's just no longer surfaced, via the same `_remove_missing`
+  path used for genuinely deleted files. This is the intended
+  decluttering effect for large collections, not a bug.
+  None of this needed any DB schema, API, or frontend change — the
+  `show_name`/`season_number`/`episode_number`/`title` columns and
+  every consumer of them (`GET /api/shows`, `GET
+  /api/library?show_name=`, the frontend's show dropdown and row
+  labels) were already generic to where the values came from.
   Scans run in the background (see below), coordinated by a
   module-level `threading.Lock` plus a `_scan_state` dict
   (`get_scan_status`/`start_scan`/`run_claimed_scan`) — `start_scan()`

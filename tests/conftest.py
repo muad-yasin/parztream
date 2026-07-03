@@ -15,6 +15,10 @@ def media_dir(tmp_path):
 def make_file(media_dir):
     def _make(name, content=b"hello world"):
         path = media_dir / name
+        # `name` may contain subdirectories (e.g. "Show/Season 1/ep.mkv") --
+        # a no-op for existing flat-file callers, since media_dir itself
+        # already exists.
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         return path
 

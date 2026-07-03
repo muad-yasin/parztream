@@ -54,26 +54,57 @@ def scan_media_dirs():
             # symlink placed inside a scanned folder (even one named
             # "song.mp3") could point anywhere on disk and get scanned,
             # indexed, and served as if it were a real media file.
-            for root, _dirnames, filenames in os.walk(media_dir, followlinks=False):
+            for root, dirnames, filenames in os.walk(media_dir, followlinks=False):
+                root_path = Path(root)
+                # This directory is a TV show folder if any of its immediate
+                # children looks like a season folder -- used below to keep
+                # a season folder that (so far) only has one ripped episode
+                # from being mistaken for a movie folder.
+                has_season_subfolder = any(
+                    _SEASON_FOLDER_RE.fullmatch(d.strip()) for d in dirnames
+                )
+
+                video_paths = []
+                audio_paths = []
                 for filename in filenames:
-                    path = Path(root) / filename
+                    path = root_path / filename
                     if path.is_symlink() or not path.is_file():
                         continue
                     ext = path.suffix.lower()
                     if ext in AUDIO_EXTENSIONS:
-                        media_type = "audio"
+                        audio_paths.append(path)
                     elif ext in VIDEO_EXTENSIONS:
-                        media_type = "video"
+                        if _TRAILER_SAMPLE_RE.search(path.stem):
+                            # Never added to the library at all -- if one of
+                            # these was scanned before (e.g. it used to have
+                            # a different name), _remove_missing below drops
+                            # it since it's absent from found_paths.
+                            continue
+                        video_paths.append(path)
                     else:
                         continue
+
+                # A folder with exactly one real video and no season
+                # subfolders reads as a single movie -- its folder name is
+                # usually clean even when the release filename inside it
+                # isn't (e.g. "Inception (2010)/Inception.2010.GROUP.mkv").
+                # Ambiguous cases (2+ real videos, no season structure) are
+                # deliberately left alone rather than guessing which file
+                # "is" the movie.
+                is_movie_folder = not has_season_subfolder and len(video_paths) == 1
+
+                for path in video_paths:
                     found_paths.add(str(path))
-                    _upsert_media(conn, path, media_type)
+                    _upsert_media(conn, path, "video", media_dir, is_movie_folder)
+                for path in audio_paths:
+                    found_paths.add(str(path))
+                    _upsert_media(conn, path, "audio", media_dir)
 
         _remove_missing(conn, found_paths)
 
 
-def _upsert_media(conn, path: Path, media_type: str):
-    info = _extract_metadata(path, media_type)
+def _upsert_media(conn, path: Path, media_type: str, media_root: Path = None, is_movie_folder: bool = False):
+    info = _extract_metadata(path, media_type, media_root, is_movie_folder)
     info["size_bytes"] = path.stat().st_size
     conn.execute(
         """
@@ -94,7 +125,7 @@ def _upsert_media(conn, path: Path, media_type: str):
     )
 
 
-def _extract_metadata(path: Path, media_type: str):
+def _extract_metadata(path: Path, media_type: str, media_root: Path = None, is_movie_folder: bool = False):
     info = {
         "title": path.stem,
         "artist": None,
@@ -124,7 +155,22 @@ def _extract_metadata(path: Path, media_type: str):
                 pass
     else:
         info["duration"], info["video_codec"], info["audio_codec"] = _probe_video_info(path)
-        info["show_name"], info["season_number"], info["episode_number"] = _parse_show_episode(path.stem)
+
+        show_name, season_number, episode_number = (None, None, None)
+        if media_root is not None:
+            show_name, season_number, episode_number = _parse_folder_show_episode(path, media_root)
+        if show_name is None:
+            show_name, season_number, episode_number = _parse_show_episode(path.stem)
+        info["show_name"], info["season_number"], info["episode_number"] = (
+            show_name, season_number, episode_number,
+        )
+
+        # Only a fallback for files that aren't part of a recognized show --
+        # e.g. a season folder with just one episode ripped so far must
+        # never be retitled to its folder's name just because it happens to
+        # be the only video there (show_name is already set above by then).
+        if show_name is None and is_movie_folder:
+            info["title"] = path.parent.name
 
     return info
 
@@ -153,6 +199,80 @@ def _parse_show_episode(stem: str):
     if not show_name:
         return None, None, None
     return show_name, int(match.group("season")), int(match.group("episode"))
+
+
+# Matches a season folder name in isolation (full match, not a substring):
+# "Season 1", "Season 01", "Season  12", "S01", "S1", "Season 00" (specials).
+# Trailing junk ("Season 1 (2013)", "Season 1 Extras") is deliberately
+# rejected -- same "don't guess wrong" policy as _SHOW_EPISODE_RE.
+_SEASON_FOLDER_RE = re.compile(r"^(?:season\s*(?P<s1>\d{1,2})|s(?P<s2>\d{1,2}))$", re.IGNORECASE)
+
+# A video whose name ends in "trailer"/"sample" (optionally pluralized or
+# followed by digits/punctuation, e.g. "trailer1", "Inception-trailer",
+# "samples") is excluded from the library entirely. End-anchored rather
+# than a bare substring search so a legitimately-titled file like
+# "Trailer Park Boys.mkv" is left alone -- "trailer"/"sample" only counts
+# when it's the trailing token, matching how these files are actually named
+# in practice.
+_TRAILER_SAMPLE_RE = re.compile(r"(?:^|[\W_])(?:trailer|sample)s?[\W_\d]*$", re.IGNORECASE)
+
+# Episode number extracted from a filename when the season number is
+# already known from a season folder (see _parse_folder_show_episode) --
+# tried in order: an explicit S##E## tag anywhere in the name (season part
+# ignored, the folder's season wins), then a leading "Episode N" word form,
+# then a bare leading number ("01 - Uno.mkv"). The \d{1,3} cap on all three
+# means a 4-digit filename like "1984.mkv" can never match as an episode
+# number -- greedy \d{1,3} plus the required trailing separator/end-of-string
+# can't consume all 4 digits and still satisfy the boundary.
+_EPISODE_TAG_RE = re.compile(r"[Ss]\d{1,2}[Ee](?P<episode>\d{1,3})")
+_EPISODE_WORD_RE = re.compile(r"^episode[\s._-]*(?P<episode>\d{1,3})\b", re.IGNORECASE)
+_LEADING_EPISODE_RE = re.compile(r"^(?P<episode>\d{1,3})(?=[\s._-]|$)")
+
+
+def _parse_episode_in_stem(stem: str):
+    match = _EPISODE_TAG_RE.search(stem)
+    if match:
+        return int(match.group("episode"))
+    match = _EPISODE_WORD_RE.match(stem)
+    if match:
+        return int(match.group("episode"))
+    match = _LEADING_EPISODE_RE.match(stem)
+    if match:
+        return int(match.group("episode"))
+    return None
+
+
+def _parse_folder_show_episode(path: Path, media_root: Path):
+    """Detect the Plex/Jellyfin-style "<Show>/<Season Folder>/<episode
+    file>" convention. Returns (show_name, season_number, episode_number),
+    all None if the structure doesn't unambiguously match -- callers should
+    fall back to _parse_show_episode(path.stem) in that case, never mix
+    partial results. Only ever looks at the immediate parent folder, so an
+    Extras/Behind the Scenes folder nested inside a season folder is
+    correctly left ungrouped rather than misread as an episode."""
+    season_dir = path.parent
+    match = _SEASON_FOLDER_RE.fullmatch(season_dir.name.strip())
+    if not match:
+        return None, None, None
+
+    show_dir = season_dir.parent
+    # A season folder sitting directly under a configured library root has
+    # no distinct show folder above it -- using the library root's own name
+    # ("TV", "Media", ...) as the show name would be worse than not
+    # grouping at all.
+    if show_dir == media_root:
+        return None, None, None
+
+    show_name = show_dir.name.strip()
+    if not show_name:
+        return None, None, None
+
+    season_number = int(match.group("s1") or match.group("s2"))
+    episode_number = _parse_episode_in_stem(path.stem)
+    if episode_number is None:
+        return None, None, None
+
+    return show_name, season_number, episode_number
 
 
 def _probe_video_info(path: Path):
