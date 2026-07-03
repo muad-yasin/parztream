@@ -167,8 +167,28 @@ def _upsert_media(conn, path: Path, media_type: str, media_root: Path = None, is
     audio_codec aren't checked here: a legitimately silent video has no
     audio_codec without ffprobe having failed at all, so that would
     false-positive."""
-    info = _extract_metadata(path, media_type, media_root, is_movie_folder)
-    info["size_bytes"] = path.stat().st_size
+    size_bytes = path.stat().st_size
+
+    # If a previous scan already paid the cost of the packet-scan duration
+    # fallback (see _probe_duration_via_packets) for this exact path and
+    # the file is still the same size, reuse that duration instead of
+    # re-walking every packet again -- that fallback is proportional to a
+    # file's duration/bitrate, so re-running it on every single rescan is
+    # genuinely expensive for a large (e.g. ~2GB TV episode) file, unlike
+    # every other field extracted here. A same-size-but-different-content
+    # replacement (rare) would serve a stale duration -- an accepted
+    # trade-off, the same class of assumption any size/mtime-based change
+    # detection makes.
+    cached_duration = None
+    if media_type == "video":
+        existing = conn.execute(
+            "SELECT duration, size_bytes FROM media WHERE path = ?", (str(path),)
+        ).fetchone()
+        if existing is not None and existing["size_bytes"] == size_bytes and existing["duration"] is not None:
+            cached_duration = existing["duration"]
+
+    info = _extract_metadata(path, media_type, media_root, is_movie_folder, cached_duration)
+    info["size_bytes"] = size_bytes
     conn.execute(
         """
         INSERT INTO media
@@ -193,7 +213,10 @@ def _upsert_media(conn, path: Path, media_type: str, media_root: Path = None, is
     return media_type == "video" and info["duration"] is None
 
 
-def _extract_metadata(path: Path, media_type: str, media_root: Path = None, is_movie_folder: bool = False):
+def _extract_metadata(
+    path: Path, media_type: str, media_root: Path = None, is_movie_folder: bool = False,
+    cached_duration: float = None,
+):
     info = {
         "title": path.stem,
         "artist": None,
@@ -229,7 +252,7 @@ def _extract_metadata(path: Path, media_type: str, media_root: Path = None, is_m
         (
             info["duration"], info["video_codec"], info["audio_codec"],
             info["video_width"], info["video_height"],
-        ) = _probe_video_info(path)
+        ) = _probe_video_info(path, cached_duration)
 
         show_name, season_number, episode_number, is_extra = (None, None, None, False)
         if media_root is not None:
@@ -457,14 +480,16 @@ def _parse_folder_show_episode(path: Path, media_root: Path):
     return show_name, season_number, episode_number, False
 
 
-def _probe_video_info(path: Path):
+def _probe_video_info(path: Path, cached_duration: float = None):
     """Return (duration, video_codec, audio_codec, width, height) via a
     single ffprobe call. video_codec/audio_codec are the *first* video/audio
     stream's codec name (e.g. "h264", "ac3"), used by app/transcode.py to
     decide whether a file can be played directly in a browser. width/height
     are the first video stream's dimensions, used by app/transcode.py to
     decide whether a re-encode needs to scale down to fit the resolution
-    cap."""
+    cap. cached_duration, when given (see _upsert_media), skips the
+    expensive packet-scan fallback below entirely by reusing a previous
+    scan's result for this same file."""
     try:
         result = subprocess.run(
             [
@@ -497,7 +522,7 @@ def _probe_video_info(path: Path):
             audio_codec = stream.get("codec_name")
 
     if duration is None:
-        duration = _probe_duration_via_packets(path)
+        duration = cached_duration if cached_duration is not None else _probe_duration_via_packets(path)
 
     return duration, video_codec, audio_codec, width, height
 
@@ -510,8 +535,14 @@ def _probe_duration_via_packets(path: Path):
     element. format.duration then comes back empty even though the file
     plays fine and its codec/width/height are readable. This walks the
     video stream's packet headers (demuxing only, no real decode) to find
-    the last packet's pts_time, which is a real, cheap-enough duration
-    estimate."""
+    the last packet's pts_time -- a real duration estimate, but unlike the
+    primary probe its cost scales with the file's duration/bitrate (a
+    ~2GB, hour-long 1080p file can have 60,000+ packets to read
+    sequentially), so it is genuinely not cheap for a large file on slow
+    storage. _upsert_media caches the result (keyed on path + size_bytes)
+    so this only ever runs once per file rather than on every rescan,
+    which is what makes a generous timeout below safe rather than a
+    per-scan tax."""
     try:
         result = subprocess.run(
             [
@@ -521,7 +552,7 @@ def _probe_duration_via_packets(path: Path):
                 "-of", "csv=print_section=0",
                 str(path),
             ],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=240,
         )
     except (FileNotFoundError, subprocess.SubprocessError):
         return None
