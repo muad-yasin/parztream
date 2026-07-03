@@ -283,26 +283,97 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
 - `app/transcode.py` — `resolve_playable_path(row)` decides whether a
   video's original file can be played directly (mp4/webm container +
   h264/vp8/vp9/av1 video + aac/mp3/opus/vorbis audio, or no codec info
-  yet — see below), or needs a one-time `ffmpeg -c:v copy` remux
-  (only re-encoding audio, via `-c:a aac`, if the audio codec itself
-  is the problem — e.g. AC3/DTS) cached to `CACHE_DIR/{id}.mp4`. This
-  is deliberately *not* full transcoding: video is always copied, never
-  re-encoded, so a genuinely incompatible video codec (e.g. HEVC)
-  raises `UnsupportedVideoCodec` instead of silently failing or trying
-  to fake support. Audio files always direct-play (never routed
-  through this). If `video_codec` is `None` (ffprobe unavailable, or
-  the row predates this feature and hasn't been rescanned), it falls
-  back to direct play rather than guessing wrong. The remux runs
-  **synchronously in the request** on a cache miss — no background
-  job/polling like scanning has — since it's normally fast (stream
-  copy, not re-encode); an audio-only transcode of a long file is the
-  one case that can take noticeably longer. The frontend's `playMedia`
-  absorbs this by probing with a tiny ranged request before handing
-  the URL to `<video>`/`<audio>`, so the cache is already warm by the
-  time real playback starts. Calls `cache.prune()` right after writing
-  a new file (see `app/cache.py`) — an evicted file isn't a loss, just
-  a cache miss on next play (cheap to re-derive, unlike the original
-  scan metadata).
+  yet — falls back to direct play rather than guessing wrong), or
+  raises one of two exceptions the caller (`app/routers/stream.py`)
+  routes on: `NeedsHlsRemux` (container/audio needs fixing, or — see
+  below — the video codec itself does too) or `UnsupportedVideoCodec`
+  (video codec incompatible and no re-encode is available). Audio
+  files always direct-play, never routed through any of this.
+
+  **Container/audio-only fix (the common case)**: on-demand HLS, not a
+  single blocking file. A confirmed-real bug drove this design: an
+  earlier synchronous "write one whole remuxed .mp4 file, then serve
+  it" approach meant a request for a large file blocked for however
+  long the *entire* remux took (minutes, for a large file) before any
+  bytes could be served, and two viewers of the same uncached file
+  serialized on each other. Instead, `build_playlist(duration)`
+  returns a static, complete VOD `.m3u8` computed once from the file's
+  known duration (every segment index listed upfront, even though most
+  don't exist as files yet), and `ensure_segment(media_id, src_path,
+  remux_audio, index, ...)` generates one ~6s segment (`SEGMENT_SECONDS`)
+  at a time, on demand, into `CACHE_DIR/{media_id}_hls/segment_NNNNN.ts`,
+  via `ffmpeg -f segment -segment_time 6 -segment_start_number N`. This
+  is what makes seeking work correctly even mid-conversion: a segment
+  request either finds it already cached, joins a job already headed
+  there (`_find_or_start_job`, deduped per `hls_dir` via `_jobs`/
+  `_jobs_guard`, with `LOOKAHEAD_SEGMENTS` deciding "close enough to
+  just wait" vs. spawning a new job), or starts a fresh `ffmpeg -ss
+  <time>` job seeked directly to that point. A segment file existing
+  on disk is *not* proof it's finished being written (ffmpeg's segment
+  muxer keeps the current one open) — `ensure_segment`'s wait loop
+  only trusts a segment once the *next* segment has appeared or the
+  job has fully exited, otherwise a reader could get a truncated file.
+  All spawned processes are tracked in `_all_processes` and killed by
+  `terminate_all_jobs()` on server shutdown (`app/main.py`'s lifespan)
+  so a restart never leaves an orphaned ffmpeg running.
+
+  **Video codec itself incompatible (e.g. HEVC) — real transcoding,
+  opt-in and off by default** (`config.TRANSCODE_ENABLED`,
+  `PARZTREAM_ENABLE_TRANSCODE`): when enabled, `resolve_playable_path`
+  checks `app/encoder_detect.py`'s `get_encoder()` before deciding —
+  if it finds a working encoder, `NeedsHlsRemux(reencode_video=True)`
+  is raised instead of `UnsupportedVideoCodec`, and `_start_job` swaps
+  `-c:v copy` for `-c:v <encoder> -vf scale=...` (see `_scale_args`,
+  which caps re-encodes at 1080p, never upscales, and is a no-op —
+  same "don't guess" pattern as elsewhere — when `video_width`/
+  `video_height` are unknown). This is deliberately gated behind both
+  a config flag AND actual runtime detection, never assumed: real
+  encoding is meaningfully CPU/GPU-intensive in a way stream-copy
+  never is, and parztream's realistic hardware (NAS boxes, old
+  laptops, Raspberry Pi) is exactly where that could make things
+  *worse* than today's download-link fallback if it ran unconditionally.
+  A `threading.Semaphore(config.MAX_CONCURRENT_TRANSCODES)` (default 1)
+  caps concurrent re-encode jobs specifically — stream-copy jobs never
+  touch it, staying as cheap and uncapped as before. That semaphore is
+  deliberately acquired *outside* `_jobs_guard` in `_find_or_start_job`
+  (a double-checked-locking pattern, re-verifying nothing changed while
+  waiting for a slot) — acquiring a potentially-blocking semaphore
+  while holding `_jobs_guard` would stall every other media id's
+  segment requests too, since that lock is the single serialization
+  point across the whole module, not just the caller's own video.
+  See `app/encoder_detect.py` for why the software fallback is
+  `libopenh264` and not `libx264`. Calls `cache.prune()` after each
+  job completes successfully (see `app/cache.py`, which recurses into
+  `*_hls/` directories) — an evicted segment isn't a loss, just a
+  cache miss regenerated on next request, same philosophy as the
+  original single-file cache.
+- `app/encoder_detect.py` — `get_encoder()` answers "what `-c:v` value
+  should a real re-encode use on this machine," cached for the life of
+  the process after the first call (thread-safe, lock-guarded so
+  concurrent first-callers only trigger one probing round — same
+  dedup philosophy as `app/transcode.py`'s `_jobs_guard`). Tries
+  hardware candidates in a platform-specific order (`h264_videotoolbox`
+  on macOS; `h264_qsv`/`h264_vaapi`/`h264_nvenc`/`h264_amf` on
+  Windows/Linux, in that order) before falling back to `libopenh264`
+  (software). Each candidate is verified with a genuine one-frame
+  synthetic encode (`-f lavfi -i color=...` to `-f null -`), not just
+  "is it listed in `ffmpeg -encoders`" — a hardware encoder can be
+  compiled in but still fail at runtime (no GPU, missing driver, no
+  permissions), and listing alone would silently produce a broken
+  first transcode instead of a clean fallback. `libopenh264` (BSD) is
+  the fallback specifically because the vendored Windows/Linux ffmpeg
+  is deliberately LGPL-licensed (see `ADVANCED.md`), which excludes
+  GPL-licensed `libx264`/`libx265` entirely — hardware encoders don't
+  have this problem since they call OS/vendor APIs at runtime rather
+  than bundling GPL code, which is exactly why they're tried first
+  regardless of licensing. Detection is lazy (first real-transcode
+  request), not run at server startup, since the whole feature is
+  opt-in and most installs/requests never touch this path at all.
+  **Unverified**: hardware-encoder success has not been confirmed on
+  real hardware (development happened with no GPU/hardware encode path
+  available), and the real vendored BtbN binaries' actual encoder
+  inventory hasn't been spot-checked against what this module assumes
+  — flag this if you touch it, don't quietly treat it as confirmed.
 - `app/auth.py` — `SessionAuthMiddleware`, a pure ASGI middleware (not
   `BaseHTTPMiddleware`, which buffers `StreamingResponse` bodies —
   that would hurt streaming large files). Replaced `BasicAuthMiddleware`

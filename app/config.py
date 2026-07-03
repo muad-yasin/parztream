@@ -68,3 +68,23 @@ MDNS_HOSTNAME = os.environ.get("PARZTREAM_MDNS_HOSTNAME", "parztream")
 PORT = int(os.environ.get("PARZTREAM_PORT", "8000"))
 
 MDNS_ENABLED = os.environ.get("PARZTREAM_MDNS_ENABLED", "true").lower() not in ("0", "false", "no")
+
+# Enables real video re-encoding (not just container/audio remuxing) for
+# videos whose video codec itself can't be played in a browser (e.g. HEVC)
+# -- see app/transcode.py and app/encoder_detect.py. Off by default: even
+# with a detected hardware encoder, this is meaningfully more CPU/GPU-
+# intensive than the existing stream-copy remux path, and the only software
+# encoder guaranteed present in the vendored ffmpeg (libopenh264, chosen for
+# LGPL licensing -- see ADVANCED.md) is noticeably lower quality-per-bit
+# than libx264. When unset, UnsupportedVideoCodec -> download-only behavior
+# is completely unchanged, and app/encoder_detect.py is never even called.
+TRANSCODE_ENABLED = os.environ.get("PARZTREAM_ENABLE_TRANSCODE", "").lower() in ("1", "true", "yes")
+
+# Caps how many *re-encoding* (not stream-copy remux) HLS jobs run at once,
+# system-wide -- separate from app/transcode.py's existing per-media job
+# dedup, which already prevents redundant jobs for the *same* video. This
+# instead prevents N different videos each spawning their own encode job
+# and overwhelming a weak CPU (the libopenh264 software fallback) or a
+# modest GPU. Small default: this is a home-LAN tool, not a transcoding farm.
+_max_concurrent_transcodes_raw = os.environ.get("PARZTREAM_MAX_CONCURRENT_TRANSCODES")
+MAX_CONCURRENT_TRANSCODES = int(_max_concurrent_transcodes_raw) if _max_concurrent_transcodes_raw else 1

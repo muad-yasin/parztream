@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app import transcode
+from app import config, encoder_detect, transcode
 
 requires_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None, reason="ffmpeg not installed"
@@ -368,3 +368,195 @@ def test_terminate_all_jobs_stops_still_running_processes(tmp_path, monkeypatch)
 
     transcode.terminate_all_jobs()
     assert terminated.is_set()
+
+
+def test_incompatible_codec_with_transcode_disabled_raises_unsupported(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "TRANSCODE_ENABLED", False)
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"x")
+    row = _row(path=str(f), video_codec="hevc", audio_codec="aac")
+
+    with pytest.raises(transcode.UnsupportedVideoCodec):
+        transcode.resolve_playable_path(row)
+
+
+def test_incompatible_codec_with_transcode_enabled_but_no_encoder_raises_unsupported(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "TRANSCODE_ENABLED", True)
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: None)
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"x")
+    row = _row(path=str(f), video_codec="hevc", audio_codec="aac")
+
+    with pytest.raises(transcode.UnsupportedVideoCodec):
+        transcode.resolve_playable_path(row)
+
+
+def test_incompatible_codec_with_transcode_enabled_and_encoder_found_needs_hls_remux(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "TRANSCODE_ENABLED", True)
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "libopenh264")
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"x")
+    row = _row(path=str(f), video_codec="hevc", audio_codec="ac3")
+
+    with pytest.raises(transcode.NeedsHlsRemux) as exc_info:
+        transcode.resolve_playable_path(row)
+    assert exc_info.value.reencode_video is True
+    assert exc_info.value.remux_audio is True  # ac3 is also incompatible
+
+
+def test_transcode_disabled_never_calls_encoder_detection(tmp_path, monkeypatch):
+    # Proves the flag short-circuits before encoder_detect is even touched
+    # -- zero new code runs when the feature is off, exactly today's
+    # behavior.
+    monkeypatch.setattr(config, "TRANSCODE_ENABLED", False)
+    called = []
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: called.append(True))
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"x")
+    row = _row(path=str(f), video_codec="hevc", audio_codec="aac")
+
+    with pytest.raises(transcode.UnsupportedVideoCodec):
+        transcode.resolve_playable_path(row)
+    assert called == []
+
+
+def test_scale_args_noop_when_dimensions_unknown():
+    assert transcode._scale_args(None, None) == []
+
+
+def test_scale_args_noop_when_at_or_under_cap():
+    assert transcode._scale_args(1920, 1080) == []
+    assert transcode._scale_args(640, 480) == []
+
+
+def test_scale_args_present_when_over_cap_landscape():
+    args = transcode._scale_args(3840, 2160)
+    assert args[0] == "-vf"
+    assert "1920" in args[1] and "1080" in args[1]
+
+
+def test_scale_args_present_when_over_cap_portrait():
+    args = transcode._scale_args(2160, 3840)
+    assert args[0] == "-vf"
+    assert "1920" in args[1] and "1080" in args[1]
+
+
+def test_reencode_jobs_are_limited_by_the_transcode_semaphore(tmp_path, monkeypatch):
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(transcode, "_transcode_semaphore", threading.Semaphore(1))
+    # Avoid real encoder detection running (subprocess.run) while
+    # subprocess.Popen is mocked below -- subprocess.run's internal `with
+    # Popen(...)` would break against our non-context-manager fake.
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "libopenh264")
+
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"source bytes")
+    release_first = threading.Event()
+
+    def fake_popen(cmd, **kwargs):
+        def on_communicate():
+            release_first.wait(timeout=5)
+            return b"", b"", 0
+        return _FakeProcess(on_communicate)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        # Holds the only semaphore slot.
+        transcode._find_or_start_job(transcode.hls_dir_for(201), f, False, 0, True, None, None)
+
+        job2_started = threading.Event()
+
+        def start_job2():
+            transcode._find_or_start_job(transcode.hls_dir_for(202), f, False, 0, True, None, None)
+            job2_started.set()
+
+        t = threading.Thread(target=start_job2)
+        t.start()
+        time.sleep(0.2)
+        assert not job2_started.is_set(), "second re-encode job should be blocked on the semaphore"
+
+        release_first.set()  # job 1 finishes, releasing its slot
+        assert job2_started.wait(timeout=5), "second job never unblocked after the first released its slot"
+        t.join()
+
+
+def test_stream_copy_jobs_never_touch_the_transcode_semaphore(tmp_path, monkeypatch):
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(transcode, "_transcode_semaphore", threading.Semaphore(1))
+
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"source bytes")
+
+    def fake_popen(cmd, **kwargs):
+        return _FakeProcess(lambda: (b"", b"", 0))
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        transcode._transcode_semaphore.acquire()  # exhaust it first
+        # A stream-copy (reencode_video=False, the default) job must still
+        # start immediately -- this call would hang until test timeout if
+        # it incorrectly waited on the exhausted semaphore.
+        job = transcode._find_or_start_job(transcode.hls_dir_for(301), f, False, 0)
+        assert job is not None
+
+
+@requires_ffmpeg
+def test_hevc_source_is_transcoded_to_h264_via_software_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "libopenh264")
+
+    hevc_path = tmp_path / "clip.mkv"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-c:v", "libx265", "-c:a", "aac", "-shortest",
+            str(hevc_path),
+        ],
+        check=True,
+    )
+
+    segment = transcode.ensure_segment(500, hevc_path, remux_audio=False, index=0, reencode_video=True)
+
+    assert segment.is_file()
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(segment)],
+        capture_output=True, text=True, check=True,
+    )
+    assert "h264" in probe.stdout
+
+
+@requires_ffmpeg
+def test_resolution_cap_applied_during_reencode(tmp_path, monkeypatch):
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "libopenh264")
+
+    hevc_path = tmp_path / "clip4k.mkv"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=blue:size=3840x2160:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-c:v", "libx265", "-c:a", "aac", "-shortest",
+            str(hevc_path),
+        ],
+        check=True,
+    )
+
+    segment = transcode.ensure_segment(
+        501, hevc_path, remux_audio=False, index=0, reencode_video=True,
+        video_width=3840, video_height=2160,
+    )
+
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height", "-of", "csv=p=0", str(segment),
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    # .ts (MPEG-TS) containers can report stream info more than once (PMT/PID
+    # quirk) -- the first non-empty line is enough to confirm the cap applied.
+    first_line = next(line for line in probe.stdout.splitlines() if line.strip())
+    width, height = first_line.split(",")
+    assert int(width) == 1920
+    assert int(height) == 1080

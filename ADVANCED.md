@@ -14,6 +14,7 @@ themselves are put together.
 - [Mobile/PWA details](#mobilepwa-details)
 - [How login sessions work](#how-login-sessions-work)
 - [Configuration reference](#configuration-reference)
+- [Real video transcoding](#real-video-transcoding)
 - [Running as a background service](#running-as-a-background-service)
 - [Building the Windows .exe](#building-the-windows-exe)
 - [Building the Linux AppImage](#building-the-linux-appimage)
@@ -221,6 +222,8 @@ want to configure it another way (e.g. for the service setups below).
 | `PARZTREAM_SECRET_KEY` | Signs session cookies. If unset, a random key is generated on every restart, meaning everyone's logged out each time. Set a fixed value (`python3 -c "import secrets; print(secrets.token_hex(32))"`) to keep people logged in across restarts. | random per-restart |
 | `PARZTREAM_CACHE_DIR` | Where repackaged videos and video thumbnails are cached. | `cache/` |
 | `PARZTREAM_CACHE_MAX_BYTES` | Caps the cache folder's total size — oldest files are deleted once a new one pushes it over the limit. An evicted file just gets cheaply re-derived next time it's played. | unset (no limit) |
+| `PARZTREAM_ENABLE_TRANSCODE` | Enables real video re-encoding for videos whose codec itself can't play in a browser (e.g. HEVC), using a detected hardware encoder or a software fallback. Off by default; those files fall back to download-only. See [Real video transcoding](#real-video-transcoding). | unset (off) |
+| `PARZTREAM_MAX_CONCURRENT_TRANSCODES` | Caps how many videos can be re-encoded at once (separate from the existing per-video job dedup). | `1` |
 | `PARZTREAM_MDNS_ENABLED` | Set to `false` to turn off the `parztream.local` network announcement. | `true` |
 | `PARZTREAM_MDNS_HOSTNAME` | Name advertised on the network. Change this if running more than one instance on the same LAN. | `parztream` |
 | `PARZTREAM_PORT` | Must match whatever `--port` you start uvicorn with — purely informational, only affects what's advertised on the network. | `8000` |
@@ -233,6 +236,51 @@ client, another OS account with folder access, plain
 misconfiguration) expose arbitrary files through the
 streaming/download endpoints. This is intentional and not something
 to "fix" by following symlinks.
+
+## Real video transcoding
+
+By default, a video whose codec itself can't be decoded by a browser
+(HEVC being the common case) can only be downloaded, not played
+in-browser — parztream never re-encodes video unless you explicitly
+turn it on with `PARZTREAM_ENABLE_TRANSCODE=1`, because unlike the
+container/audio-only fixing it always does, a real re-encode is
+genuinely CPU/GPU-intensive. Given parztream's realistic hardware
+range (NAS boxes, old laptops, Raspberry Pi via the Linux build), that
+cost has to be opt-in, not assumed safe for everyone.
+
+When enabled, parztream tries a hardware encoder first (Intel Quick
+Sync, NVIDIA NVENC, AMD AMF/VCE, VAAPI, or Apple VideoToolbox,
+depending on platform), verified with a real test encode the first
+time it's needed, not just assumed from what ffmpeg claims to
+support — a hardware encoder can be compiled in but still fail at
+runtime with no GPU present or a missing driver. If no hardware
+encoder works, it falls back to `libopenh264` (a software H.264
+encoder). Re-encoded video is always capped at 1080p (downscaled,
+never upscaled) to bound worst-case cost regardless of source
+resolution, and `PARZTREAM_MAX_CONCURRENT_TRANSCODES` (default `1`)
+limits how many videos can be re-encoding at once so one weak CPU/GPU
+doesn't get asked to do several at the same time.
+
+**Why `libopenh264`, not `libx264`:** the vendored ffmpeg for the
+Windows/Linux builds is deliberately LGPL-licensed (see below), which
+excludes GPL-licensed `libx264`/`libx265` entirely. `libopenh264` is
+the only software H.264 encoder available in that build — it's
+noticeably lower quality-per-bit than `libx264`, a direct trade-off of
+staying LGPL-only rather than switching those two platforms to a GPL
+ffmpeg build. macOS's Homebrew-sourced ffmpeg already includes
+`libx264`/`libx265` (see the macOS packaging section), but this
+feature doesn't rely on that, to keep encoder detection uniform across
+platforms.
+
+**Honesty about what's actually been verified:** hardware-encoder
+success has not been confirmed on real hardware — development and
+testing happened in an environment with no GPU/hardware encode path
+available at all, so only "candidate compiled in but fails at
+runtime" and "falls through to software" have actually been
+exercised. Likewise, the exact set of encoders compiled into the real
+vendored BtbN binaries (as opposed to a generic system ffmpeg) hasn't
+been spot-checked. If you enable this and a hardware encoder you
+expect to work isn't being picked up, that's the first place to look.
 
 ## Running as a background service
 

@@ -173,14 +173,17 @@ def _upsert_media(conn, path: Path, media_type: str, media_root: Path = None, is
         """
         INSERT INTO media
             (path, media_type, title, artist, album, duration, size_bytes,
-             video_codec, audio_codec, show_name, season_number, episode_number)
+             video_codec, audio_codec, video_width, video_height,
+             show_name, season_number, episode_number)
         VALUES
             (:path, :media_type, :title, :artist, :album, :duration, :size_bytes,
-             :video_codec, :audio_codec, :show_name, :season_number, :episode_number)
+             :video_codec, :audio_codec, :video_width, :video_height,
+             :show_name, :season_number, :episode_number)
         ON CONFLICT(path) DO UPDATE SET
             title=excluded.title, artist=excluded.artist, album=excluded.album,
             duration=excluded.duration, size_bytes=excluded.size_bytes,
             video_codec=excluded.video_codec, audio_codec=excluded.audio_codec,
+            video_width=excluded.video_width, video_height=excluded.video_height,
             show_name=excluded.show_name, season_number=excluded.season_number,
             episode_number=excluded.episode_number
         """,
@@ -197,6 +200,8 @@ def _extract_metadata(path: Path, media_type: str, media_root: Path = None, is_m
         "duration": None,
         "video_codec": None,
         "audio_codec": None,
+        "video_width": None,
+        "video_height": None,
         "show_name": None,
         "season_number": None,
         "episode_number": None,
@@ -218,7 +223,10 @@ def _extract_metadata(path: Path, media_type: str, media_root: Path = None, is_m
             except Exception:
                 pass
     else:
-        info["duration"], info["video_codec"], info["audio_codec"] = _probe_video_info(path)
+        (
+            info["duration"], info["video_codec"], info["audio_codec"],
+            info["video_width"], info["video_height"],
+        ) = _probe_video_info(path)
 
         show_name, season_number, episode_number = (None, None, None)
         if media_root is not None:
@@ -340,22 +348,25 @@ def _parse_folder_show_episode(path: Path, media_root: Path):
 
 
 def _probe_video_info(path: Path):
-    """Return (duration, video_codec, audio_codec) via a single ffprobe call.
-    video_codec/audio_codec are the *first* video/audio stream's codec name
-    (e.g. "h264", "ac3"), used by app/transcode.py to decide whether a file
-    can be played directly in a browser."""
+    """Return (duration, video_codec, audio_codec, width, height) via a
+    single ffprobe call. video_codec/audio_codec are the *first* video/audio
+    stream's codec name (e.g. "h264", "ac3"), used by app/transcode.py to
+    decide whether a file can be played directly in a browser. width/height
+    are the first video stream's dimensions, used by app/transcode.py to
+    decide whether a re-encode needs to scale down to fit the resolution
+    cap."""
     try:
         result = subprocess.run(
             [
                 "ffprobe", "-v", "error",
-                "-show_entries", "format=duration:stream=codec_type,codec_name",
+                "-show_entries", "format=duration:stream=codec_type,codec_name,width,height",
                 "-of", "json", str(path),
             ],
             capture_output=True, text=True, timeout=10,
         )
         data = json.loads(result.stdout)
     except (FileNotFoundError, subprocess.SubprocessError, json.JSONDecodeError):
-        return None, None, None
+        return None, None, None, None, None
 
     duration = None
     try:
@@ -365,13 +376,17 @@ def _probe_video_info(path: Path):
 
     video_codec = None
     audio_codec = None
+    width = None
+    height = None
     for stream in data.get("streams", []):
         if stream.get("codec_type") == "video" and video_codec is None:
             video_codec = stream.get("codec_name")
+            width = stream.get("width")
+            height = stream.get("height")
         elif stream.get("codec_type") == "audio" and audio_codec is None:
             audio_codec = stream.get("codec_name")
 
-    return duration, video_codec, audio_codec
+    return duration, video_codec, audio_codec, width, height
 
 
 def _remove_missing(conn, found_paths: set):

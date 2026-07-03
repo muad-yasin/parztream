@@ -111,12 +111,12 @@ def stream_media(media_id: int, request: Request, original: bool = False):
     )
 
 
-def _require_hls(row) -> bool:
-    """Returns the `remux_audio` flag if this row genuinely needs HLS
-    remuxing; raises a clean HTTPException otherwise. Hitting these routes
-    for a file that doesn't need remuxing at all would be a frontend bug,
-    not a normal case -- fail with a real error rather than silently doing
-    the wrong thing."""
+def _require_hls(row):
+    """Returns (remux_audio, reencode_video) if this row genuinely needs
+    HLS remuxing; raises a clean HTTPException otherwise. Hitting these
+    routes for a file that doesn't need remuxing at all would be a frontend
+    bug, not a normal case -- fail with a real error rather than silently
+    doing the wrong thing."""
     try:
         transcode.resolve_playable_path(row)
     except transcode.UnsupportedVideoCodec as exc:
@@ -125,14 +125,14 @@ def _require_hls(row) -> bool:
             detail=f"Video codec '{exc}' can't be played in a browser yet",
         )
     except transcode.NeedsHlsRemux as exc:
-        return exc.remux_audio
+        return exc.remux_audio, exc.reencode_video
     raise HTTPException(status_code=400, detail="This file doesn't need HLS remuxing")
 
 
 @router.get("/stream/{media_id}/hls/playlist.m3u8")
 def stream_hls_playlist(media_id: int):
     row = _get_media_row(media_id)
-    _require_hls(row)
+    _require_hls(row)  # only need the raise-or-not here, not the returned flags
 
     if row["duration"] is None:
         raise HTTPException(
@@ -147,7 +147,7 @@ def stream_hls_playlist(media_id: int):
 @router.get("/stream/{media_id}/hls/{segment_name}")
 def stream_hls_segment(media_id: int, segment_name: str):
     row = _get_media_row(media_id)
-    remux_audio = _require_hls(row)
+    remux_audio, reencode_video = _require_hls(row)
 
     match = SEGMENT_NAME_RE.fullmatch(segment_name)
     if not match:
@@ -159,7 +159,10 @@ def stream_hls_segment(media_id: int, segment_name: str):
         raise HTTPException(status_code=404, detail="File missing on disk")
 
     try:
-        segment_path = transcode.ensure_segment(media_id, original_path, remux_audio, index)
+        segment_path = transcode.ensure_segment(
+            media_id, original_path, remux_audio, index,
+            reencode_video, row["video_width"], row["video_height"],
+        )
     except transcode.RemuxFailed as exc:
         logger.error("Remux failed for media %s: %s", media_id, exc)
         raise HTTPException(

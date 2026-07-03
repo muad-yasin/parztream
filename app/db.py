@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS media (
     size_bytes INTEGER,
     video_codec TEXT,
     audio_codec TEXT,
+    video_width INTEGER,
+    video_height INTEGER,
     show_name TEXT,
     season_number INTEGER,
     episode_number INTEGER,
