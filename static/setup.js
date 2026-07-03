@@ -13,7 +13,13 @@ const selectedFolders = [];
 
 async function browse(path) {
   const params = path ? new URLSearchParams({ path }) : new URLSearchParams();
-  const res = await fetch(`/api/setup/browse?${params}`);
+  let res;
+  try {
+    res = await fetch(`/api/setup/browse?${params}`);
+  } catch (err) {
+    errorEl.textContent = "Couldn't reach the server. Check your connection and try again.";
+    return;
+  }
   if (!res.ok) {
     errorEl.textContent = "Couldn't open that folder.";
     return;
@@ -90,11 +96,18 @@ addFolderBtn.addEventListener("click", () => {
 saveBtn.addEventListener("click", async () => {
   saveBtn.disabled = true;
   errorEl.textContent = "";
-  const res = await fetch("/api/setup", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ media_dirs: selectedFolders }),
-  });
+  let res;
+  try {
+    res = await fetch("/api/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ media_dirs: selectedFolders }),
+    });
+  } catch (err) {
+    errorEl.textContent = "Couldn't reach the server. Check your connection and try again.";
+    saveBtn.disabled = false;
+    return;
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     errorEl.textContent = body.detail || "Something went wrong saving your folders.";

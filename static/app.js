@@ -7,6 +7,8 @@ const logoutBtn = document.getElementById("logout-btn");
 const playerContainer = document.getElementById("player-container");
 const pagerEl = document.getElementById("pager");
 const announcerEl = document.getElementById("status-announcer");
+const scanBanner = document.getElementById("scan-banner");
+const scanBannerText = document.getElementById("scan-banner-text");
 
 const PAGE_SIZE = 50;
 let offset = 0;
@@ -19,6 +21,26 @@ const isTouchDevice = window.matchMedia("(pointer: coarse)").matches;
 
 function announce(message) {
   announcerEl.textContent = message;
+}
+
+function showScanBanner(text) {
+  scanBannerText.textContent = text;
+  scanBanner.hidden = false;
+}
+
+function hideScanBanner() {
+  scanBanner.hidden = true;
+}
+
+// Replaces the whole list with a single centered message -- used for the
+// loading state, network/server errors, and (via renderList) empty results,
+// so there's always some feedback in the list area instead of a blank gap.
+function showListMessage(text) {
+  listEl.innerHTML = "";
+  const li = document.createElement("li");
+  li.className = "empty-message";
+  li.textContent = text;
+  listEl.appendChild(li);
 }
 
 function requestVideoFullscreen(el) {
@@ -42,8 +64,16 @@ function requestVideoFullscreen(el) {
 
 async function loadShowList() {
   const selected = showSelectEl.value;
-  const res = await fetch("/api/shows");
-  const shows = await res.json();
+  let shows;
+  try {
+    const res = await fetch("/api/shows");
+    if (!res.ok) throw new Error("shows-request-failed");
+    shows = await res.json();
+  } catch (err) {
+    // Non-fatal -- the show filter just stays at "All shows" until the
+    // next successful load (e.g. after the next scan).
+    return;
+  }
 
   showSelectEl.innerHTML = "";
   const allOption = document.createElement("option");
@@ -69,7 +99,22 @@ async function loadLibrary() {
   if (showName) params.set("show_name", showName);
   if (query) params.set("q", query);
 
-  const res = await fetch(`/api/library?${params}`);
+  showListMessage("Loading…");
+
+  let res;
+  try {
+    res = await fetch(`/api/library?${params}`);
+  } catch (err) {
+    showListMessage("Couldn't reach the server. Try again.");
+    announce("Couldn't reach the server.");
+    return;
+  }
+  if (!res.ok) {
+    showListMessage("Couldn't load the library. Try again.");
+    announce("Couldn't load the library.");
+    return;
+  }
+
   const data = await res.json();
   renderList(data.items, query);
   renderPager(data.total);
@@ -154,6 +199,10 @@ async function playMedia(item) {
   preparing.className = "player-message";
   preparing.textContent = "Preparing…";
   playerContainer.appendChild(preparing);
+  // The player sits at the top of <main>, but a click far down a long list
+  // can still leave it above the viewport -- scroll it into view up front
+  // so "Preparing…"/errors/the eventual player are all actually visible.
+  playerContainer.scrollIntoView({ behavior: "smooth", block: "start" });
   announce(`Preparing ${item.title || "playback"}…`);
 
   // A tiny ranged probe first: if the file needs a container/audio fix
@@ -232,7 +281,12 @@ searchInputEl.addEventListener("input", () => {
 
 async function pollScanStatus() {
   while (true) {
-    const res = await fetch("/api/scan/status");
+    let res;
+    try {
+      res = await fetch("/api/scan/status");
+    } catch (err) {
+      throw new Error("scan-status-unreachable");
+    }
     const status = await res.json();
     if (status.status !== "scanning") {
       return status;
@@ -244,21 +298,26 @@ async function pollScanStatus() {
 scanBtn.addEventListener("click", async () => {
   scanBtn.disabled = true;
   scanBtn.textContent = "Scanning...";
+  showScanBanner("Scanning your library for media — this can take a few minutes for large libraries.");
   announce("Scanning library…");
-  const res = await fetch("/api/scan", { method: "POST" });
-  if (res.status !== 409 && !res.ok) {
+  try {
+    const res = await fetch("/api/scan", { method: "POST" });
+    if (res.status !== 409 && !res.ok) {
+      throw new Error("scan-failed-to-start");
+    }
+    const status = await pollScanStatus();
+    offset = 0;
+    await loadShowList();
+    await loadLibrary();
+    scanBtn.textContent = status.status === "error" ? "Scan failed — retry" : "Scan library";
+    announce(status.status === "error" ? "Scan failed." : "Scan complete.");
+  } catch (err) {
+    scanBtn.textContent = "Scan failed — retry";
+    announce("Couldn't reach the server. Scan failed to start.");
+  } finally {
     scanBtn.disabled = false;
-    scanBtn.textContent = "Scan library";
-    announce("Scan failed to start.");
-    return;
+    hideScanBanner();
   }
-  const status = await pollScanStatus();
-  offset = 0;
-  await loadShowList();
-  await loadLibrary();
-  scanBtn.disabled = false;
-  scanBtn.textContent = status.status === "error" ? "Scan failed — retry" : "Scan library";
-  announce(status.status === "error" ? "Scan failed." : "Scan complete.");
 });
 
 logoutBtn.addEventListener("click", async () => {
@@ -267,12 +326,36 @@ logoutBtn.addEventListener("click", async () => {
 });
 
 async function init() {
-  const res = await fetch("/api/setup/status");
-  const status = await res.json();
+  let status;
+  try {
+    const res = await fetch("/api/setup/status");
+    status = await res.json();
+  } catch (err) {
+    showListMessage("Couldn't reach the server. Try reloading the page.");
+    return;
+  }
   if (!status.configured) {
     window.location.href = "/setup.html";
     return;
   }
+
+  // Setup triggers a background scan right after saving folders and
+  // redirects straight here -- without this check, a first-time user lands
+  // on what looks like an empty, broken library with no indication a scan
+  // is already running.
+  try {
+    const scanRes = await fetch("/api/scan/status");
+    const scanStatus = await scanRes.json();
+    if (scanStatus.status === "scanning") {
+      showScanBanner("Setting up your library — scanning for media now. This can take a few minutes.");
+      announce("Scanning library…");
+      await pollScanStatus();
+      hideScanBanner();
+    }
+  } catch (err) {
+    // Non-fatal -- fall through and load whatever's already in the library.
+  }
+
   await loadShowList();
   await loadLibrary();
 }

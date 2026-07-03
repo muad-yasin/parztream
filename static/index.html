@@ -38,9 +38,13 @@
   </header>
 
   <main id="main-content" tabindex="-1">
+    <div id="scan-banner" class="scan-banner" role="status" aria-live="polite" hidden>
+      <p id="scan-banner-text">Scanning your library for media…</p>
+      <div class="progress-bar"><div class="progress-bar-fill"></div></div>
+    </div>
+    <div id="player-container"></div>
     <ul id="media-list"></ul>
     <div id="pager"></div>
-    <div id="player-container"></div>
   </main>
 
   <div id="status-announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>

@@ -124,6 +124,49 @@ main {
   margin: 0 auto;
 }
 
+.scan-banner {
+  padding: 0.85rem 1rem;
+  border: 1px solid #2a2e35;
+  border-radius: 8px;
+  background: #1e2127;
+  color: #9aa0aa;
+}
+
+.scan-banner p {
+  margin: 0 0 0.6rem;
+}
+
+.progress-bar {
+  position: relative;
+  height: 4px;
+  border-radius: 999px;
+  background: #2a2e35;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 40%;
+  border-radius: 999px;
+  background: #7aa2f7;
+  animation: progress-indeterminate 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-bar-fill {
+    animation: none;
+    width: 100%;
+  }
+}
+
+@keyframes progress-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
 #player-container {
   position: sticky;
   top: 1rem;
