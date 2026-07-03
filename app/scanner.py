@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import subprocess
@@ -12,8 +13,25 @@ from . import settings
 from .config import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS
 from .db import get_connection
 
+logger = logging.getLogger("parztream")
+
 _scan_lock = threading.Lock()
-_scan_state = {"status": "idle", "error": None, "last_scan_at": None}
+_scan_state = {
+    "status": "idle",
+    "error": None,
+    "last_scan_at": None,
+    "scanned_count": 0,
+    "failed_count": 0,
+    "failed_examples": [],
+    "incomplete_count": 0,
+    "incomplete_examples": [],
+}
+
+# Cap on how many per-file diagnostic entries are kept in detail -- the
+# counts (failed_count/incomplete_count) keep counting past this, only the
+# example lists stop growing, so the JSON payload stays small even for a
+# scan with hundreds of problem files.
+_MAX_DIAGNOSTIC_EXAMPLES = 20
 
 
 def get_scan_status():
@@ -26,6 +44,11 @@ def start_scan():
         return False
     _scan_state["status"] = "scanning"
     _scan_state["error"] = None
+    _scan_state["scanned_count"] = 0
+    _scan_state["failed_count"] = 0
+    _scan_state["failed_examples"] = []
+    _scan_state["incomplete_count"] = 0
+    _scan_state["incomplete_examples"] = []
     return True
 
 
@@ -95,15 +118,55 @@ def scan_media_dirs():
 
                 for path in video_paths:
                     found_paths.add(str(path))
-                    _upsert_media(conn, path, "video", media_dir, is_movie_folder)
+                    try:
+                        incomplete = _upsert_media(conn, path, "video", media_dir, is_movie_folder)
+                    except Exception as exc:
+                        _record_scan_failure(path, exc)
+                        continue
+                    _scan_state["scanned_count"] += 1
+                    if incomplete:
+                        _record_incomplete_metadata(path)
                 for path in audio_paths:
                     found_paths.add(str(path))
-                    _upsert_media(conn, path, "audio", media_dir)
+                    try:
+                        _upsert_media(conn, path, "audio", media_dir)
+                    except Exception as exc:
+                        _record_scan_failure(path, exc)
+                        continue
+                    _scan_state["scanned_count"] += 1
 
         _remove_missing(conn, found_paths)
 
 
-def _upsert_media(conn, path: Path, media_type: str, media_root: Path = None, is_movie_folder: bool = False):
+def _record_scan_failure(path: Path, exc: Exception):
+    """A single file's processing failed (e.g. it vanished mid-scan, or hit
+    a DB error) -- log it and record it as a diagnostic, but never let it
+    abort the rest of the scan. Confirmed real bug before this existed: one
+    bad file raised all the way up through this loop into run_claimed_scan's
+    whole-scan except, silently skipping every file that would have come
+    after it in the walk."""
+    logger.warning("Scan: skipping %s after error: %s: %s", path, type(exc).__name__, exc)
+    _scan_state["failed_count"] += 1
+    if len(_scan_state["failed_examples"]) < _MAX_DIAGNOSTIC_EXAMPLES:
+        _scan_state["failed_examples"].append(
+            {"path": str(path), "error": f"{type(exc).__name__}: {exc}"}
+        )
+
+
+def _record_incomplete_metadata(path: Path):
+    _scan_state["incomplete_count"] += 1
+    if len(_scan_state["incomplete_examples"]) < _MAX_DIAGNOSTIC_EXAMPLES:
+        _scan_state["incomplete_examples"].append({"path": str(path)})
+
+
+def _upsert_media(conn, path: Path, media_type: str, media_root: Path = None, is_movie_folder: bool = False) -> bool:
+    """Returns True if this was a video whose duration couldn't be
+    determined (ffprobe failed) -- checked specifically because a None
+    duration later 500s app/routers/stream.py's HLS playlist endpoint,
+    which can't build a playlist without a known duration. video_codec/
+    audio_codec aren't checked here: a legitimately silent video has no
+    audio_codec without ffprobe having failed at all, so that would
+    false-positive."""
     info = _extract_metadata(path, media_type, media_root, is_movie_folder)
     info["size_bytes"] = path.stat().st_size
     conn.execute(
@@ -123,6 +186,7 @@ def _upsert_media(conn, path: Path, media_type: str, media_root: Path = None, is
         """,
         {"path": str(path), "media_type": media_type, **info},
     )
+    return media_type == "video" and info["duration"] is None
 
 
 def _extract_metadata(path: Path, media_type: str, media_root: Path = None, is_movie_folder: bool = False):

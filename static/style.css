@@ -166,6 +166,25 @@ main {
   margin: 0 0 0.6rem;
 }
 
+.scan-diagnostics {
+  padding: 0.85rem 1rem;
+  border: 1px solid #2a2e35;
+  border-radius: 8px;
+  background: #1e2127;
+  color: #9aa0aa;
+}
+
+.scan-diagnostics summary {
+  cursor: pointer;
+  color: #e6e6e6;
+}
+
+.scan-diagnostics ul {
+  margin: 0.6rem 0 0;
+  padding-left: 1.25rem;
+  font-size: 0.9rem;
+}
+
 .progress-bar {
   position: relative;
   height: 4px;

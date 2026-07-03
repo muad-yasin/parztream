@@ -180,6 +180,11 @@ def test_scan_endpoint_runs_in_background_and_updates_status(client, make_file):
     assert status["status"] == "idle"
     assert status["last_scan_at"] is not None
     assert client.get("/api/library").json()["total"] == 1
+    assert status["scanned_count"] == 1
+    assert status["failed_count"] == 0
+    assert status["failed_examples"] == []
+    assert status["incomplete_count"] == 0
+    assert status["incomplete_examples"] == []
 
 
 def test_art_endpoint_404s_when_file_has_no_embedded_artwork(client, make_file):

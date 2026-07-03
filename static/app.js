@@ -9,6 +9,9 @@ const pagerEl = document.getElementById("pager");
 const announcerEl = document.getElementById("status-announcer");
 const scanBanner = document.getElementById("scan-banner");
 const scanBannerText = document.getElementById("scan-banner-text");
+const scanDiagnosticsEl = document.getElementById("scan-diagnostics");
+const scanDiagnosticsSummaryEl = document.getElementById("scan-diagnostics-summary");
+const scanDiagnosticsListEl = document.getElementById("scan-diagnostics-list");
 
 const PAGE_SIZE = 50;
 let offset = 0;
@@ -30,6 +33,37 @@ function showScanBanner(text) {
 
 function hideScanBanner() {
   scanBanner.hidden = true;
+}
+
+// Renders a post-scan summary of per-file problems -- stays hidden entirely
+// when nothing went wrong, so the common all-clean case looks exactly as
+// clean as before this existed.
+function renderScanDiagnostics(status) {
+  const failedCount = status.failed_count || 0;
+  const incompleteCount = status.incomplete_count || 0;
+  if (!failedCount && !incompleteCount) {
+    scanDiagnosticsEl.hidden = true;
+    return;
+  }
+
+  const parts = [`${status.scanned_count || 0} files scanned`];
+  if (failedCount) parts.push(`${failedCount} failed`);
+  if (incompleteCount) parts.push(`${incompleteCount} with incomplete metadata`);
+  scanDiagnosticsSummaryEl.textContent = parts.join(", ");
+
+  scanDiagnosticsListEl.innerHTML = "";
+  for (const { path, error } of status.failed_examples || []) {
+    const li = document.createElement("li");
+    li.textContent = `Failed: ${path} — ${error}`;
+    scanDiagnosticsListEl.appendChild(li);
+  }
+  for (const { path } of status.incomplete_examples || []) {
+    const li = document.createElement("li");
+    li.textContent = `Incomplete metadata: ${path}`;
+    scanDiagnosticsListEl.appendChild(li);
+  }
+
+  scanDiagnosticsEl.hidden = false;
 }
 
 // Replaces the whole list with a single centered message -- used for the
@@ -433,6 +467,7 @@ scanBtn.addEventListener("click", async () => {
   scanBtn.disabled = true;
   scanBtn.textContent = "Scanning...";
   showScanBanner("Scanning your library for media — this can take a few minutes for large libraries.");
+  scanDiagnosticsEl.hidden = true; // clear any stale summary from a previous scan
   announce("Scanning library…");
   try {
     const res = await fetch("/api/scan", { method: "POST" });
@@ -444,7 +479,14 @@ scanBtn.addEventListener("click", async () => {
     await loadShowList();
     await loadLibrary();
     scanBtn.textContent = status.status === "error" ? "Scan failed — retry" : "Scan library";
-    announce(status.status === "error" ? "Scan failed." : "Scan complete.");
+    renderScanDiagnostics(status);
+    if (status.status === "error") {
+      announce("Scan failed.");
+    } else if (status.failed_count || status.incomplete_count) {
+      announce(`Scan complete with ${status.failed_count || 0} failed and ${status.incomplete_count || 0} with incomplete metadata.`);
+    } else {
+      announce("Scan complete.");
+    }
   } catch (err) {
     scanBtn.textContent = "Scan failed — retry";
     announce("Couldn't reach the server. Scan failed to start.");
@@ -483,8 +525,9 @@ async function init() {
     if (scanStatus.status === "scanning") {
       showScanBanner("Setting up your library — scanning for media now. This can take a few minutes.");
       announce("Scanning library…");
-      await pollScanStatus();
+      const finalStatus = await pollScanStatus();
       hideScanBanner();
+      renderScanDiagnostics(finalStatus);
     }
   } catch (err) {
     // Non-fatal -- fall through and load whatever's already in the library.

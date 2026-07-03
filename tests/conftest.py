@@ -52,7 +52,11 @@ def isolated_app_state(tmp_path, media_dir, monkeypatch):
 
     if scanner._scan_lock.locked():
         scanner._scan_lock.release()
-    scanner._scan_state.update(status="idle", error=None, last_scan_at=None)
+    scanner._scan_state.update(
+        status="idle", error=None, last_scan_at=None,
+        scanned_count=0, failed_count=0, failed_examples=[],
+        incomplete_count=0, incomplete_examples=[],
+    )
 
     yield
 

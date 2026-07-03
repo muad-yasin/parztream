@@ -1,6 +1,7 @@
 import shutil
 import subprocess
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -394,3 +395,80 @@ def test_real_mp3_tags_and_duration_are_extracted(media_dir):
     assert row["title"] == "Real Title"
     assert row["artist"] == "Real Artist"
     assert row["duration"] == pytest.approx(1.0, abs=0.2)
+
+
+def test_hard_failure_on_one_file_does_not_abort_the_scan(make_file):
+    # Regression test for a real bug: before this, _upsert_media had no
+    # try/except around path.stat()/the DB upsert, so one vanished/corrupt
+    # file raised all the way out of scan_media_dirs's loop and silently
+    # skipped every file that would have come after it in the walk.
+    make_file("good1.mp3")
+    bad_path = make_file("vanishes.mp3")
+    make_file("good2.mp3")
+
+    real_upsert = scanner._upsert_media
+
+    def flaky_upsert(conn, path, *args, **kwargs):
+        if path == bad_path:
+            path.unlink()  # forces a real FileNotFoundError from path.stat()
+        return real_upsert(conn, path, *args, **kwargs)
+
+    scanner.start_scan()
+    with mock.patch.object(scanner, "_upsert_media", side_effect=flaky_upsert):
+        scanner.scan_media_dirs()
+    scanner._scan_lock.release()
+
+    rows = {Path(r["path"]).name for r in _rows()}
+    assert rows == {"good1.mp3", "good2.mp3"}
+    assert scanner._scan_state["scanned_count"] == 2
+    assert scanner._scan_state["failed_count"] == 1
+    assert scanner._scan_state["failed_examples"][0]["path"] == str(bad_path)
+    assert "FileNotFoundError" in scanner._scan_state["failed_examples"][0]["error"]
+
+
+def test_incomplete_metadata_is_tracked_without_failing_the_file(make_file, monkeypatch):
+    make_file("good.mkv")
+    make_file("no_duration.mkv")
+
+    def flaky_probe(path):
+        if path.name == "no_duration.mkv":
+            return None, None, None
+        return 100.0, "h264", "aac"
+
+    monkeypatch.setattr(scanner, "_probe_video_info", flaky_probe)
+    scanner.start_scan()
+    scanner.scan_media_dirs()
+    scanner._scan_lock.release()
+
+    rows = {Path(r["path"]).name: r for r in _rows()}
+    assert rows["no_duration.mkv"]["duration"] is None
+    assert scanner._scan_state["scanned_count"] == 2
+    assert scanner._scan_state["failed_count"] == 0
+    assert scanner._scan_state["incomplete_count"] == 1
+    assert scanner._scan_state["incomplete_examples"][0]["path"].endswith("no_duration.mkv")
+
+
+def test_incomplete_metadata_not_flagged_for_a_legitimately_silent_video(make_file, monkeypatch):
+    # A real video with no audio track has audio_codec=None without ffprobe
+    # having failed at all -- must not be misreported as incomplete.
+    make_file("silent.mkv")
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path: (100.0, "h264", None))
+
+    scanner.start_scan()
+    scanner.scan_media_dirs()
+    scanner._scan_lock.release()
+
+    assert scanner._scan_state["incomplete_count"] == 0
+
+
+def test_failed_examples_are_capped_but_failed_count_keeps_counting(make_file):
+    for i in range(scanner._MAX_DIAGNOSTIC_EXAMPLES + 5):
+        make_file(f"bad{i}.mp3")
+
+    scanner.start_scan()
+    with mock.patch.object(scanner, "_upsert_media", side_effect=RuntimeError("boom")):
+        scanner.scan_media_dirs()
+    scanner._scan_lock.release()
+
+    assert scanner._scan_state["failed_count"] == scanner._MAX_DIAGNOSTIC_EXAMPLES + 5
+    assert len(scanner._scan_state["failed_examples"]) == scanner._MAX_DIAGNOSTIC_EXAMPLES
