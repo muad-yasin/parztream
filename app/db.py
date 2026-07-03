@@ -20,10 +20,13 @@ CREATE TABLE IF NOT EXISTS media (
     show_name TEXT,
     season_number INTEGER,
     episode_number INTEGER,
+    is_movie INTEGER NOT NULL DEFAULT 0,
+    is_extra INTEGER NOT NULL DEFAULT 0,
     added_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_media_type ON media(media_type);
 CREATE INDEX IF NOT EXISTS idx_show_name ON media(show_name);
+CREATE INDEX IF NOT EXISTS idx_is_movie ON media(is_movie);
 
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,

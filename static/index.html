@@ -26,11 +26,6 @@
         <option value="video">Video</option>
       </select>
 
-      <label for="show-select" class="sr-only">Filter by show</label>
-      <select id="show-select">
-        <option value="">All shows</option>
-      </select>
-
       <span class="controls-divider" aria-hidden="true"></span>
 
       <button id="scan-btn">Scan library</button>
@@ -49,8 +44,33 @@
       <ul id="scan-diagnostics-list"></ul>
     </details>
     <div id="player-container"></div>
-    <ul id="media-list"></ul>
-    <div id="pager"></div>
+
+    <div id="home-view">
+      <section id="movies-section">
+        <h2>Movies</h2>
+        <div id="movies-grid" class="poster-grid"></div>
+        <div id="movies-pager"></div>
+      </section>
+      <section id="shows-section">
+        <h2>TV Shows</h2>
+        <div id="shows-grid" class="poster-grid"></div>
+      </section>
+    </div>
+
+    <div id="search-view" hidden>
+      <ul id="media-list"></ul>
+      <div id="pager"></div>
+    </div>
+
+    <div id="show-view" hidden>
+      <button id="show-back-btn" type="button">&larr; Back</button>
+      <h2 id="show-view-title"></h2>
+      <div id="show-seasons"></div>
+      <details id="show-extras" class="scan-diagnostics" hidden>
+        <summary>Extras (<span id="show-extras-count">0</span>)</summary>
+        <ul id="show-extras-list"></ul>
+      </details>
+    </div>
   </main>
 
   <div id="status-announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>

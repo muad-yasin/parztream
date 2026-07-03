@@ -145,13 +145,152 @@ button:hover {
   }
 }
 
+/* Widened from the original 900px so the poster grids (#home-view) have
+   room to actually lay out multiple columns on a desktop screen --
+   #search-view/#show-view opt back into the narrower reading width below,
+   since a flat list/season list doesn't benefit from the extra width the
+   same way a grid does. */
 main {
   display: grid;
   grid-template-columns: 1fr;
   gap: 1rem;
   padding: 1.5rem;
-  max-width: 900px;
+  max-width: 1400px;
   margin: 0 auto;
+}
+
+#search-view,
+#show-view {
+  max-width: 900px;
+  width: 100%;
+  margin: 0 auto;
+  display: grid;
+  gap: 1rem;
+}
+
+#home-view {
+  display: grid;
+  gap: 1.5rem;
+}
+
+#movies-section h2,
+#shows-section h2 {
+  font-size: 1.1rem;
+  margin: 0 0 0.75rem;
+  color: #e6e6e6;
+}
+
+.poster-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 1rem;
+}
+
+@media (max-width: 640px) {
+  .poster-grid {
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+    gap: 0.75rem;
+  }
+}
+
+/* A taller, vertical variant of .row-btn -- poster image on top at a
+   standard movie/show-poster aspect ratio, label below. Shares .row-btn's
+   already-verified hover/focus contrast rather than introducing new
+   colors. */
+.poster-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.poster-tile:hover {
+  background: #23262c;
+}
+
+.poster-tile:focus-visible {
+  outline: 2px solid #7aa2f7;
+  outline-offset: 2px;
+}
+
+.poster-thumb {
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  border-radius: 6px;
+  object-fit: cover;
+  background: #2a2e35;
+}
+
+.poster-thumb-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9aa0aa;
+  font-size: 1.75rem;
+}
+
+.poster-label {
+  padding: 0 0.25rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9rem;
+}
+
+#show-back-btn {
+  justify-self: start;
+}
+
+#show-seasons h3 {
+  font-size: 1rem;
+  margin: 1rem 0 0.5rem;
+  color: #e6e6e6;
+}
+
+#show-seasons h3:first-child {
+  margin-top: 0;
+}
+
+#show-seasons ul {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  border: 1px solid #2a2e35;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+#show-seasons ul li {
+  border-bottom: 1px solid #2a2e35;
+}
+
+#show-seasons ul li:last-child {
+  border-bottom: none;
+}
+
+#show-extras-list {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  border: 1px solid #2a2e35;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+#show-extras-list li {
+  border-bottom: 1px solid #2a2e35;
+}
+
+#show-extras-list li:last-child {
+  border-bottom: none;
 }
 
 .scan-banner {

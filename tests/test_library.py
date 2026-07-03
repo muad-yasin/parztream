@@ -13,19 +13,20 @@ requires_ffmpeg = pytest.mark.skipif(
 
 def _insert_media(
     path, media_type="audio", show_name=None, season_number=None, episode_number=None,
-    duration=None, title=None, artist=None, album=None,
+    duration=None, title=None, artist=None, album=None, is_movie=False, is_extra=False,
 ):
     with get_connection() as conn:
         cur = conn.execute(
             """
             INSERT INTO media
                 (path, media_type, title, artist, album, size_bytes,
-                 show_name, season_number, episode_number, duration)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 show_name, season_number, episode_number, duration, is_movie, is_extra)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(path), media_type, title or path.stem, artist, album, path.stat().st_size,
                 show_name, season_number, episode_number, duration,
+                int(is_movie), int(is_extra),
             ),
         )
         return cur.lastrowid
@@ -130,13 +131,75 @@ def test_list_shows_groups_by_show_name_with_episode_counts(client, make_file):
     _insert_media(make_file("chosen1.mp4"), "video", show_name="The Chosen", season_number=1, episode_number=1)
     _insert_media(make_file("chosen2.mp4"), "video", show_name="The Chosen", season_number=1, episode_number=2)
     _insert_media(make_file("other.mp4"), "video", show_name="Other Show", season_number=1, episode_number=1)
-    _insert_media(make_file("movie.mp4"), "video")  # no show_name -- shouldn't appear
+    _insert_media(make_file("movie.mp4"), "video", is_movie=True)  # no show_name -- shouldn't appear
 
     res = client.get("/api/shows")
 
     assert res.status_code == 200
     shows = {s["show_name"]: s["episode_count"] for s in res.json()}
     assert shows == {"The Chosen": 2, "Other Show": 1}
+
+
+def test_list_shows_excludes_extras_from_counts_and_grouping(client, make_file):
+    _insert_media(make_file("chosen1.mp4"), "video", show_name="The Chosen", season_number=1, episode_number=1)
+    _insert_media(make_file("extra.mp4"), "video", show_name="The Chosen", is_extra=True)
+    _insert_media(make_file("phantom.mp4"), "video", show_name="Phantom Extras Only", is_extra=True)
+
+    res = client.get("/api/shows")
+
+    shows = {s["show_name"]: s["episode_count"] for s in res.json()}
+    assert shows == {"The Chosen": 1}
+
+
+def test_list_shows_includes_sample_media_id_for_poster_tiles(client, make_file):
+    id1 = _insert_media(make_file("chosen1.mp4"), "video", show_name="The Chosen", season_number=1, episode_number=1)
+    _insert_media(make_file("chosen2.mp4"), "video", show_name="The Chosen", season_number=1, episode_number=2)
+
+    res = client.get("/api/shows")
+
+    show = next(s for s in res.json() if s["show_name"] == "The Chosen")
+    assert show["sample_media_id"] == id1
+
+
+def test_list_media_excludes_extras_by_default(client, make_file):
+    _insert_media(make_file("ep1.mp4"), "video", show_name="The Chosen", season_number=1, episode_number=1)
+    _insert_media(make_file("extra.mp4"), "video", show_name="The Chosen", is_extra=True)
+
+    res = client.get("/api/library", params={"show_name": "The Chosen"})
+
+    assert res.json()["total"] == 1
+
+
+def test_list_media_extras_true_returns_only_extras(client, make_file):
+    _insert_media(make_file("ep1.mp4"), "video", show_name="The Chosen", season_number=1, episode_number=1)
+    extra_id = _insert_media(make_file("extra.mp4"), "video", show_name="The Chosen", is_extra=True)
+
+    res = client.get("/api/library", params={"show_name": "The Chosen", "extras": "true"})
+
+    body = res.json()
+    assert body["total"] == 1
+    assert body["items"][0]["id"] == extra_id
+
+
+def test_search_excludes_extras(client, make_file):
+    _insert_media(make_file("a.mp4"), "video", title="Rhapsody Extra", is_extra=True)
+    _insert_media(make_file("b.mp4"), "video", title="Rhapsody Real")
+
+    res = client.get("/api/library", params={"q": "rhapsody"})
+
+    titles = {i["title"] for i in res.json()["items"]}
+    assert titles == {"Rhapsody Real"}
+
+
+def test_list_media_filters_by_is_movie(client, make_file):
+    _insert_media(make_file("movie.mp4"), "video", is_movie=True)
+    _insert_media(make_file("ep.mp4"), "video", show_name="Show", season_number=1, episode_number=1)
+
+    res = client.get("/api/library", params={"is_movie": "true", "media_type": "video"})
+
+    body = res.json()
+    assert body["total"] == 1
+    assert body["items"][0]["title"] == "movie"
 
 
 def test_list_media_filters_by_show_name_ordered_by_episode(client, make_file):

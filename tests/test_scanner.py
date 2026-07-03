@@ -31,6 +31,8 @@ def _metadata(**overrides):
         "show_name": None,
         "season_number": None,
         "episode_number": None,
+        "is_movie": False,
+        "is_extra": False,
     }
     base.update(overrides)
     return base
@@ -172,59 +174,141 @@ def test_scan_populates_show_fields_for_episode_style_filenames(make_file, monke
     [
         (
             "/media/TV/Breaking Bad/Season 1/Breaking Bad - S01E01 - Pilot.mkv",
-            "/media/TV", ("Breaking Bad", 1, 1),
+            "/media/TV", ("Breaking Bad", 1, 1, False),
         ),
         (
             "/media/TV/Better Call Saul/Season 01/01 - Uno.mkv",
-            "/media/TV", ("Better Call Saul", 1, 1),
+            "/media/TV", ("Better Call Saul", 1, 1, False),
         ),
         (
             "/media/TV/Show/Season 2/Episode 3.mkv",
-            "/media/TV", ("Show", 2, 3),
+            "/media/TV", ("Show", 2, 3, False),
         ),
         # Folder season wins over a conflicting season in the filename.
         (
             "/media/TV/Show/season 2/S01E05 - Title.mkv",
-            "/media/TV", ("Show", 2, 5),
+            "/media/TV", ("Show", 2, 5, False),
         ),
         (
             "/media/TV/Show/S2/07.mkv",
-            "/media/TV", ("Show", 2, 7),
+            "/media/TV", ("Show", 2, 7, False),
         ),
         # Trailing junk in the season folder name -> reject.
         (
             "/media/TV/Show/Season 1 (2013)/ep.mkv",
-            "/media/TV", (None, None, None),
+            "/media/TV", (None, None, None, False),
         ),
-        # Not a season folder at all.
+        # An extras-bucket folder name, but nothing on disk to confirm a
+        # real show above it (these paths don't exist on disk) -> reject.
         (
             "/media/TV/Show/Extras/Bonus.mkv",
-            "/media/TV", (None, None, None),
+            "/media/TV", (None, None, None, False),
         ),
         # Season folder directly under the library root -- no show folder.
         (
             "/media/TV/Season 1/01 - Something.mkv",
-            "/media/TV", (None, None, None),
+            "/media/TV", (None, None, None, False),
         ),
         # No episode marker in the filename at all.
         (
             "/media/TV/Show/Season 1/Pilot.mkv",
-            "/media/TV", (None, None, None),
+            "/media/TV", (None, None, None, False),
         ),
         # A 4-digit "year" filename must never be read as an episode number.
         (
             "/media/TV/Show/Season 1/1984.mkv",
-            "/media/TV", (None, None, None),
+            "/media/TV", (None, None, None, False),
         ),
         # Season 00 (specials) is a legitimate season number.
         (
             "/media/TV/Show/Season 00/S00E01 - Recap.mkv",
-            "/media/TV", ("Show", 0, 1),
+            "/media/TV", ("Show", 0, 1, False),
         ),
     ],
 )
 def test_parse_folder_show_episode(path, root, expected):
     assert scanner._parse_folder_show_episode(Path(path), Path(root)) == expected
+
+
+def test_parse_folder_show_episode_featurettes_inside_season_folder(tmp_path):
+    # The literal reported bug: a "Featurettes" bucket folder that itself
+    # contains a "Season NN"-named subfolder must still resolve to the real
+    # show above it, not to "Featurettes" as if it were the show.
+    show_dir = tmp_path / "Smallville (2001)"
+    (show_dir / "Season 01").mkdir(parents=True)
+    (show_dir / "Season 10").mkdir(parents=True)
+    featurette_dir = show_dir / "Featurettes" / "Season 10"
+    featurette_dir.mkdir(parents=True)
+    video = featurette_dir / "Back in the Jacket - A Smallville Homecoming.mkv"
+    video.touch()
+
+    assert scanner._parse_folder_show_episode(video, tmp_path) == (
+        "Smallville (2001)", None, None, True,
+    )
+
+
+def test_parse_folder_show_episode_extras_bucket_directly_under_show(tmp_path):
+    show_dir = tmp_path / "Show"
+    (show_dir / "Season 01").mkdir(parents=True)
+    (show_dir / "Featurettes").mkdir()
+    video = show_dir / "Featurettes" / "Making Of.mkv"
+    video.touch()
+
+    assert scanner._parse_folder_show_episode(video, tmp_path) == ("Show", None, None, True)
+
+
+def test_parse_folder_show_episode_extras_bucket_inside_season_folder(tmp_path):
+    show_dir = tmp_path / "Show"
+    season_dir = show_dir / "Season 03"
+    season_dir.mkdir(parents=True)
+    extras_dir = season_dir / "Deleted Scenes"
+    extras_dir.mkdir()
+    video = extras_dir / "Cut Scene.mkv"
+    video.touch()
+
+    assert scanner._parse_folder_show_episode(video, tmp_path) == ("Show", None, None, True)
+
+
+def test_parse_folder_show_episode_loose_extras_file_in_season_folder(tmp_path):
+    show_dir = tmp_path / "Show"
+    season_dir = show_dir / "Season 01"
+    season_dir.mkdir(parents=True)
+    video = season_dir / "Gag Reel.mkv"
+    video.touch()
+
+    assert scanner._parse_folder_show_episode(video, tmp_path) == ("Show", None, None, True)
+
+
+def test_parse_folder_show_episode_movie_special_features_not_mistaken_for_show(tmp_path):
+    # A movie's own bonus-features folder must never fabricate a phantom
+    # one-episode "TV show" -- there's no real Season NN folder anywhere
+    # near "Movie (2010)", so this must fall through ungrouped exactly like
+    # today, not get flagged as an extra of a fake show called "Movie (2010)".
+    movie_dir = tmp_path / "Movie (2010)"
+    features_dir = movie_dir / "Special Features"
+    features_dir.mkdir(parents=True)
+    video = features_dir / "bonus.mkv"
+    video.touch()
+
+    assert scanner._parse_folder_show_episode(video, tmp_path) == (None, None, None, False)
+
+
+def test_parse_folder_show_episode_extras_keyword_not_trailing_is_not_flagged(tmp_path):
+    # A real episode filename that happens to contain an extras keyword in
+    # a non-trailing position must never be misflagged as bonus content.
+    show_dir = tmp_path / "Show"
+    season_dir = show_dir / "Season 01"
+    season_dir.mkdir(parents=True)
+    video = season_dir / "01 - Interview with the Vampire.mkv"
+    video.touch()
+
+    show_name, season_number, episode_number, is_extra = scanner._parse_folder_show_episode(
+        video, tmp_path
+    )
+    assert is_extra is False
+    assert show_name == "Show"
+    assert season_number == 1
+    assert episode_number == 1
 
 
 @pytest.mark.parametrize(
@@ -295,6 +379,30 @@ def test_scan_derives_movie_title_from_folder_name(make_file, monkeypatch):
     row = _rows()[0]
     assert row["title"] == "Inception (2010)"
     assert row["show_name"] is None
+    assert row["is_movie"] == 1
+    assert row["is_extra"] == 0
+
+
+def test_scan_persists_is_movie_and_is_extra_flags(make_file, monkeypatch):
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path: (None, "h264", "aac", None, None))
+    make_file("TV/Smallville/Season 01/Smallville - S01E01 - Pilot.mkv")
+    make_file("TV/Smallville/Season 10/Smallville - S10E01 - Lazarus.mkv")
+    make_file("TV/Smallville/Featurettes/Season 10/Homecoming.mkv")
+    make_file("Movies/Her (2013)/Her.2013.mkv")
+    make_file("song.mp3")
+
+    scanner.scan_media_dirs()
+
+    rows = {Path(r["path"]).name: r for r in _rows()}
+    assert rows["Smallville - S01E01 - Pilot.mkv"]["is_movie"] == 0
+    assert rows["Smallville - S01E01 - Pilot.mkv"]["is_extra"] == 0
+    assert rows["Homecoming.mkv"]["is_movie"] == 0
+    assert rows["Homecoming.mkv"]["is_extra"] == 1
+    assert rows["Homecoming.mkv"]["show_name"] == "Smallville"
+    assert rows["Her.2013.mkv"]["is_movie"] == 1
+    assert rows["Her.2013.mkv"]["is_extra"] == 0
+    assert rows["song.mp3"]["is_movie"] == 0
+    assert rows["song.mp3"]["is_extra"] == 0
 
 
 def test_scan_leaves_ambiguous_multi_video_folder_titles_alone(make_file, monkeypatch):

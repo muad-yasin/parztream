@@ -20,6 +20,8 @@ def list_media(
     media_type: Optional[str] = None,
     show_name: Optional[str] = None,
     q: Optional[str] = None,
+    is_movie: Optional[bool] = None,
+    extras: Optional[bool] = None,
     limit: int = DEFAULT_PAGE_SIZE,
     offset: int = 0,
 ):
@@ -40,6 +42,16 @@ def list_media(
         # is an overly broad match, not a correctness or security issue.
         conditions.append("(title LIKE :q OR artist LIKE :q OR album LIKE :q OR show_name LIKE :q)")
         params["q"] = f"%{q}%"
+    if is_movie is not None:
+        conditions.append("is_movie = :is_movie")
+        params["is_movie"] = int(is_movie)
+    # extras=true asks for *only* bonus content (a show page's Extras
+    # section); otherwise bonus content is excluded from every other view
+    # this endpoint serves -- the default list, a show's episode list, and
+    # a keyword search should never surface "Deleted Scenes"/"Featurette"
+    # files mixed in with real episodes/movies.
+    conditions.append("is_extra = :is_extra")
+    params["is_extra"] = 1 if extras else 0
 
     where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
     # Within a show, episode order is more useful than alphabetical title.
@@ -65,9 +77,9 @@ def list_shows():
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT show_name, COUNT(*) AS episode_count
+            SELECT show_name, COUNT(*) AS episode_count, MIN(id) AS sample_media_id
             FROM media
-            WHERE show_name IS NOT NULL
+            WHERE show_name IS NOT NULL AND is_extra = 0
             GROUP BY show_name
             ORDER BY show_name
             """

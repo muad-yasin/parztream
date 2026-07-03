@@ -1,6 +1,5 @@
 const listEl = document.getElementById("media-list");
 const filterEl = document.getElementById("filter");
-const showSelectEl = document.getElementById("show-select");
 const searchInputEl = document.getElementById("search-input");
 const scanBtn = document.getElementById("scan-btn");
 const logoutBtn = document.getElementById("logout-btn");
@@ -13,8 +12,23 @@ const scanDiagnosticsEl = document.getElementById("scan-diagnostics");
 const scanDiagnosticsSummaryEl = document.getElementById("scan-diagnostics-summary");
 const scanDiagnosticsListEl = document.getElementById("scan-diagnostics-list");
 
+const homeViewEl = document.getElementById("home-view");
+const searchViewEl = document.getElementById("search-view");
+const showViewEl = document.getElementById("show-view");
+const moviesGridEl = document.getElementById("movies-grid");
+const moviesPagerEl = document.getElementById("movies-pager");
+const showsGridEl = document.getElementById("shows-grid");
+const showBackBtn = document.getElementById("show-back-btn");
+const showViewTitleEl = document.getElementById("show-view-title");
+const showSeasonsEl = document.getElementById("show-seasons");
+const showExtrasEl = document.getElementById("show-extras");
+const showExtrasCountEl = document.getElementById("show-extras-count");
+const showExtrasListEl = document.getElementById("show-extras-list");
+
 const PAGE_SIZE = 50;
+const MOVIES_PAGE_SIZE = 50;
 let offset = 0;
+let moviesOffset = 0;
 
 // "pointer: coarse" identifies touch-primary input specifically, not just
 // a narrow screen -- more reliable than a width-based check, since a small
@@ -96,41 +110,11 @@ function requestVideoFullscreen(el) {
   }
 }
 
-async function loadShowList() {
-  const selected = showSelectEl.value;
-  let shows;
-  try {
-    const res = await fetch("/api/shows");
-    if (!res.ok) throw new Error("shows-request-failed");
-    shows = await res.json();
-  } catch (err) {
-    // Non-fatal -- the show filter just stays at "All shows" until the
-    // next successful load (e.g. after the next scan).
-    return;
-  }
-
-  showSelectEl.innerHTML = "";
-  const allOption = document.createElement("option");
-  allOption.value = "";
-  allOption.textContent = "All shows";
-  showSelectEl.appendChild(allOption);
-
-  for (const show of shows) {
-    const option = document.createElement("option");
-    option.value = show.show_name;
-    option.textContent = `${show.show_name} (${show.episode_count})`;
-    showSelectEl.appendChild(option);
-  }
-  showSelectEl.value = selected;
-}
-
 async function loadLibrary() {
   const type = filterEl.value;
-  const showName = showSelectEl.value;
   const query = searchInputEl.value.trim();
   const params = new URLSearchParams({ limit: PAGE_SIZE, offset });
   if (type) params.set("media_type", type);
-  if (showName) params.set("show_name", showName);
   if (query) params.set("q", query);
 
   showListMessage("Loading…");
@@ -151,7 +135,10 @@ async function loadLibrary() {
 
   const data = await res.json();
   renderList(data.items, query);
-  renderPager(data.total);
+  renderPager(pagerEl, data.total, offset, PAGE_SIZE, (newOffset) => {
+    offset = newOffset;
+    loadLibrary();
+  });
 
   if (query) {
     announce(data.total === 0 ? `No results for "${query}"` : `${data.total} result${data.total === 1 ? "" : "s"} for "${query}"`);
@@ -164,6 +151,54 @@ async function loadLibrary() {
 // full reload when play starts).
 let activePlayingId = null;
 let activeRowBtn = null;
+
+// Builds the shared "thumbnail + label" row used by the flat search list,
+// a show's per-season episode lists, and its Extras list -- one visual/
+// interaction pattern (real <button>, decorative thumbnail, active-row
+// highlighting) reused everywhere instead of three near-duplicates.
+function createMediaRow(item) {
+  const li = document.createElement("li");
+
+  const rowBtn = document.createElement("button");
+  rowBtn.type = "button";
+  rowBtn.className = "row-btn";
+
+  const img = document.createElement("img");
+  img.className = "thumb";
+  img.loading = "lazy";
+  img.src = `/api/library/${item.id}/art`;
+  img.alt = ""; // decorative -- the label span below already names the item
+  img.onerror = () => {
+    // Previously just hid the broken image, leaving an empty gap that
+    // looked like a rendering bug rather than "no artwork available".
+    const placeholder = document.createElement("span");
+    placeholder.className = "thumb thumb-placeholder";
+    placeholder.setAttribute("aria-hidden", "true");
+    placeholder.textContent = item.media_type === "audio" ? "♪" : "▶";
+    img.replaceWith(placeholder);
+  };
+  rowBtn.appendChild(img);
+
+  const label = document.createElement("span");
+  label.className = "row-label";
+  const episodeTag = item.show_name && item.season_number != null
+    ? `S${item.season_number}E${item.episode_number} — `
+    : "";
+  const title = item.artist ? `${item.title} — ${item.artist}` : (item.title || item.path);
+  label.textContent = episodeTag + title;
+  label.title = label.textContent; // full text on hover once ellipsis truncates it
+  rowBtn.appendChild(label);
+
+  if (item.id === activePlayingId) {
+    rowBtn.classList.add("row-btn-active");
+    rowBtn.setAttribute("aria-current", "true");
+    activeRowBtn = rowBtn;
+  }
+
+  rowBtn.addEventListener("click", () => playMedia(item, rowBtn));
+  li.appendChild(rowBtn);
+  return li;
+}
 
 function renderList(items, query) {
   listEl.innerHTML = "";
@@ -178,74 +213,237 @@ function renderList(items, query) {
   }
 
   for (const item of items) {
-    const li = document.createElement("li");
-
-    const rowBtn = document.createElement("button");
-    rowBtn.type = "button";
-    rowBtn.className = "row-btn";
-
-    const img = document.createElement("img");
-    img.className = "thumb";
-    img.loading = "lazy";
-    img.src = `/api/library/${item.id}/art`;
-    img.alt = ""; // decorative -- the label span below already names the item
-    img.onerror = () => {
-      // Previously just hid the broken image, leaving an empty gap that
-      // looked like a rendering bug rather than "no artwork available".
-      const placeholder = document.createElement("span");
-      placeholder.className = "thumb thumb-placeholder";
-      placeholder.setAttribute("aria-hidden", "true");
-      placeholder.textContent = item.media_type === "audio" ? "♪" : "▶";
-      img.replaceWith(placeholder);
-    };
-    rowBtn.appendChild(img);
-
-    const label = document.createElement("span");
-    label.className = "row-label";
-    const episodeTag = item.show_name ? `S${item.season_number}E${item.episode_number} — ` : "";
-    const title = item.artist ? `${item.title} — ${item.artist}` : (item.title || item.path);
-    label.textContent = episodeTag + title;
-    label.title = label.textContent; // full text on hover once ellipsis truncates it
-    rowBtn.appendChild(label);
-
-    if (item.id === activePlayingId) {
-      rowBtn.classList.add("row-btn-active");
-      rowBtn.setAttribute("aria-current", "true");
-      activeRowBtn = rowBtn;
-    }
-
-    rowBtn.addEventListener("click", () => playMedia(item, rowBtn));
-    li.appendChild(rowBtn);
-    listEl.appendChild(li);
+    listEl.appendChild(createMediaRow(item));
   }
 }
 
-function renderPager(total) {
-  pagerEl.innerHTML = "";
+// Generic prev/info/next pager, shared by the flat search list and the
+// Movies grid -- each keeps its own offset/page-size/reload closure rather
+// than this function knowing about either view.
+function renderPager(container, total, currentOffset, pageSize, onPageChange) {
+  container.innerHTML = "";
   if (total === 0) return;
 
   const prevBtn = document.createElement("button");
   prevBtn.textContent = "Prev";
-  prevBtn.disabled = offset === 0;
-  prevBtn.addEventListener("click", () => {
-    offset = Math.max(0, offset - PAGE_SIZE);
-    loadLibrary();
-  });
+  prevBtn.disabled = currentOffset === 0;
+  prevBtn.addEventListener("click", () => onPageChange(Math.max(0, currentOffset - pageSize)));
 
   const info = document.createElement("span");
-  const start = offset + 1;
-  const end = Math.min(offset + PAGE_SIZE, total);
+  const start = currentOffset + 1;
+  const end = Math.min(currentOffset + pageSize, total);
   info.textContent = `${start}-${end} of ${total}`;
 
   const nextBtn = document.createElement("button");
   nextBtn.textContent = "Next";
-  nextBtn.disabled = offset + PAGE_SIZE >= total;
-  nextBtn.addEventListener("click", () => {
-    offset += PAGE_SIZE;
-    loadLibrary();
+  nextBtn.disabled = currentOffset + pageSize >= total;
+  nextBtn.addEventListener("click", () => onPageChange(currentOffset + pageSize));
+
+  container.append(prevBtn, info, nextBtn);
+}
+
+// Builds the shared poster-tile button used by both the Movies and TV
+// Shows grids -- a taller, vertical sibling of createMediaRow's row-btn,
+// same decorative-thumbnail/active-state conventions.
+function createPosterTile({ mediaId, label, onClick, isAudio }) {
+  const tile = document.createElement("button");
+  tile.type = "button";
+  tile.className = "poster-tile";
+
+  const img = document.createElement("img");
+  img.className = "poster-thumb";
+  img.loading = "lazy";
+  img.src = `/api/library/${mediaId}/art`;
+  img.alt = ""; // decorative -- the label below already names the item
+  img.onerror = () => {
+    const placeholder = document.createElement("span");
+    placeholder.className = "poster-thumb poster-thumb-placeholder";
+    placeholder.setAttribute("aria-hidden", "true");
+    placeholder.textContent = isAudio ? "♪" : "▶";
+    img.replaceWith(placeholder);
+  };
+  tile.appendChild(img);
+
+  const labelEl = document.createElement("span");
+  labelEl.className = "poster-label";
+  labelEl.textContent = label;
+  labelEl.title = label;
+  tile.appendChild(labelEl);
+
+  tile.addEventListener("click", () => onClick(tile));
+  return tile;
+}
+
+async function loadMoviesGrid() {
+  const params = new URLSearchParams({
+    is_movie: "true", media_type: "video", limit: MOVIES_PAGE_SIZE, offset: moviesOffset,
   });
 
-  pagerEl.append(prevBtn, info, nextBtn);
+  let res;
+  try {
+    res = await fetch(`/api/library?${params}`);
+  } catch (err) {
+    return;
+  }
+  if (!res.ok) return;
+
+  const data = await res.json();
+  moviesGridEl.innerHTML = "";
+  if (data.items.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-message";
+    empty.textContent = "No movies yet — try scanning the library.";
+    moviesGridEl.appendChild(empty);
+  } else {
+    for (const item of data.items) {
+      const tile = createPosterTile({
+        mediaId: item.id,
+        label: item.title || item.path,
+        onClick: (tileEl) => playMedia(item, tileEl),
+      });
+      if (item.id === activePlayingId) {
+        tile.classList.add("row-btn-active");
+        tile.setAttribute("aria-current", "true");
+        activeRowBtn = tile;
+      }
+      moviesGridEl.appendChild(tile);
+    }
+  }
+
+  renderPager(moviesPagerEl, data.total, moviesOffset, MOVIES_PAGE_SIZE, (newOffset) => {
+    moviesOffset = newOffset;
+    loadMoviesGrid();
+  });
+}
+
+async function loadShowsGrid() {
+  let shows;
+  try {
+    const res = await fetch("/api/shows");
+    if (!res.ok) throw new Error("shows-request-failed");
+    shows = await res.json();
+  } catch (err) {
+    return;
+  }
+
+  showsGridEl.innerHTML = "";
+  if (shows.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-message";
+    empty.textContent = "No TV shows yet — try scanning the library.";
+    showsGridEl.appendChild(empty);
+    return;
+  }
+
+  for (const show of shows) {
+    const tile = createPosterTile({
+      mediaId: show.sample_media_id,
+      label: `${show.show_name} (${show.episode_count})`,
+      onClick: () => {
+        location.hash = `#/show/${encodeURIComponent(show.show_name)}`;
+      },
+    });
+    showsGridEl.appendChild(tile);
+  }
+}
+
+async function loadShowView(showName) {
+  showViewTitleEl.textContent = showName;
+  showSeasonsEl.innerHTML = "";
+  showExtrasListEl.innerHTML = "";
+  showExtrasEl.hidden = true;
+  announce(`Loading ${showName}…`);
+
+  const episodesParams = new URLSearchParams({ show_name: showName, limit: 500 });
+  const extrasParams = new URLSearchParams({ show_name: showName, extras: "true", limit: 500 });
+
+  let episodesRes, extrasRes;
+  try {
+    [episodesRes, extrasRes] = await Promise.all([
+      fetch(`/api/library?${episodesParams}`),
+      fetch(`/api/library?${extrasParams}`),
+    ]);
+  } catch (err) {
+    announce("Couldn't reach the server.");
+    return;
+  }
+  if (!episodesRes.ok || !extrasRes.ok) {
+    announce(`Couldn't load ${showName}.`);
+    return;
+  }
+
+  const episodes = (await episodesRes.json()).items;
+  const extras = (await extrasRes.json()).items;
+
+  // Episodes already arrive ordered by season_number, episode_number --
+  // grouping preserves that order, it doesn't need to re-sort.
+  let currentSeason = null;
+  let currentSeasonList = null;
+  for (const item of episodes) {
+    if (item.season_number !== currentSeason) {
+      currentSeason = item.season_number;
+      const heading = document.createElement("h3");
+      heading.textContent = currentSeason === 0 ? "Specials" : `Season ${currentSeason}`;
+      showSeasonsEl.appendChild(heading);
+      currentSeasonList = document.createElement("ul");
+      showSeasonsEl.appendChild(currentSeasonList);
+    }
+    currentSeasonList.appendChild(createMediaRow(item));
+  }
+  if (episodes.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-message";
+    empty.textContent = "No episodes found for this show.";
+    showSeasonsEl.appendChild(empty);
+  }
+
+  if (extras.length > 0) {
+    showExtrasCountEl.textContent = extras.length;
+    for (const item of extras) {
+      showExtrasListEl.appendChild(createMediaRow(item));
+    }
+    showExtrasEl.hidden = false;
+  }
+
+  announce(`${showName}: ${episodes.length} episode${episodes.length === 1 ? "" : "s"}${extras.length ? `, ${extras.length} extra${extras.length === 1 ? "" : "s"}` : ""}.`);
+}
+
+// Decides which of the three views (home grids / flat search list / a
+// show's detail page) is currently active, based on the URL hash and the
+// existing type/search controls -- a non-empty search or the Audio filter
+// always falls back to the flat list rather than trying to force those
+// results into the grid metaphor, and #/show/<name> takes over the whole
+// content area regardless of the other controls.
+function currentRoute() {
+  const hash = location.hash;
+  if (hash.startsWith("#/show/")) {
+    return { view: "show", showName: decodeURIComponent(hash.slice("#/show/".length)) };
+  }
+  if (filterEl.value === "audio" || searchInputEl.value.trim() !== "") {
+    return { view: "search" };
+  }
+  return { view: "home" };
+}
+
+function setActiveView(view) {
+  homeViewEl.hidden = view !== "home";
+  searchViewEl.hidden = view !== "search";
+  showViewEl.hidden = view !== "show";
+}
+
+async function render() {
+  const route = currentRoute();
+  setActiveView(route.view);
+
+  if (route.view === "show") {
+    await loadShowView(route.showName);
+  } else if (route.view === "search") {
+    offset = 0;
+    await loadLibrary();
+  } else {
+    moviesOffset = 0;
+    await Promise.all([loadMoviesGrid(), loadShowsGrid()]);
+  }
 }
 
 // Playback position is persisted client-side only (no backend support for
@@ -429,23 +627,27 @@ async function playMedia(item, rowBtn) {
 }
 
 filterEl.addEventListener("change", () => {
-  offset = 0;
-  loadLibrary();
-});
-
-showSelectEl.addEventListener("change", () => {
-  offset = 0;
-  loadLibrary();
+  // Switching to/from "Audio" (or back to "All"/"Video") can move us
+  // between the flat search list and the home grids -- go through the
+  // hash-aware router rather than assuming we're already on the list.
+  if (location.hash.startsWith("#/show/")) location.hash = "#/";
+  else render();
 });
 
 let searchDebounceTimer = null;
 searchInputEl.addEventListener("input", () => {
   clearTimeout(searchDebounceTimer);
   searchDebounceTimer = setTimeout(() => {
-    offset = 0;
-    loadLibrary();
+    if (location.hash.startsWith("#/show/")) location.hash = "#/";
+    else render();
   }, 300);
 });
+
+showBackBtn.addEventListener("click", () => {
+  location.hash = "#/";
+});
+
+window.addEventListener("hashchange", render);
 
 async function pollScanStatus() {
   while (true) {
@@ -475,9 +677,11 @@ scanBtn.addEventListener("click", async () => {
       throw new Error("scan-failed-to-start");
     }
     const status = await pollScanStatus();
-    offset = 0;
-    await loadShowList();
-    await loadLibrary();
+    // A scan can add/remove shows or movies out from under whichever view
+    // is currently on screen (including a show page whose episodes/extras
+    // just changed) -- re-run the same routing logic used on load/hash
+    // change rather than assuming the flat list is what's visible.
+    await render();
     scanBtn.textContent = status.status === "error" ? "Scan failed — retry" : "Scan library";
     renderScanDiagnostics(status);
     if (status.status === "error") {
@@ -507,6 +711,10 @@ async function init() {
     const res = await fetch("/api/setup/status");
     status = await res.json();
   } catch (err) {
+    // The home grids are visible by default -- force the flat-list view
+    // on so this message is actually seen instead of landing in a hidden
+    // container behind the (still-empty) grids.
+    setActiveView("search");
     showListMessage("Couldn't reach the server. Try reloading the page.");
     return;
   }
@@ -533,8 +741,7 @@ async function init() {
     // Non-fatal -- fall through and load whatever's already in the library.
   }
 
-  await loadShowList();
-  await loadLibrary();
+  await render();
 }
 
 init();

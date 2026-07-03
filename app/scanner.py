@@ -174,18 +174,19 @@ def _upsert_media(conn, path: Path, media_type: str, media_root: Path = None, is
         INSERT INTO media
             (path, media_type, title, artist, album, duration, size_bytes,
              video_codec, audio_codec, video_width, video_height,
-             show_name, season_number, episode_number)
+             show_name, season_number, episode_number, is_movie, is_extra)
         VALUES
             (:path, :media_type, :title, :artist, :album, :duration, :size_bytes,
              :video_codec, :audio_codec, :video_width, :video_height,
-             :show_name, :season_number, :episode_number)
+             :show_name, :season_number, :episode_number, :is_movie, :is_extra)
         ON CONFLICT(path) DO UPDATE SET
             title=excluded.title, artist=excluded.artist, album=excluded.album,
             duration=excluded.duration, size_bytes=excluded.size_bytes,
             video_codec=excluded.video_codec, audio_codec=excluded.audio_codec,
             video_width=excluded.video_width, video_height=excluded.video_height,
             show_name=excluded.show_name, season_number=excluded.season_number,
-            episode_number=excluded.episode_number
+            episode_number=excluded.episode_number, is_movie=excluded.is_movie,
+            is_extra=excluded.is_extra
         """,
         {"path": str(path), "media_type": media_type, **info},
     )
@@ -205,6 +206,8 @@ def _extract_metadata(path: Path, media_type: str, media_root: Path = None, is_m
         "show_name": None,
         "season_number": None,
         "episode_number": None,
+        "is_movie": False,
+        "is_extra": False,
     }
 
     if media_type == "audio":
@@ -228,13 +231,17 @@ def _extract_metadata(path: Path, media_type: str, media_root: Path = None, is_m
             info["video_width"], info["video_height"],
         ) = _probe_video_info(path)
 
-        show_name, season_number, episode_number = (None, None, None)
+        show_name, season_number, episode_number, is_extra = (None, None, None, False)
         if media_root is not None:
-            show_name, season_number, episode_number = _parse_folder_show_episode(path, media_root)
+            show_name, season_number, episode_number, is_extra = _parse_folder_show_episode(path, media_root)
         if show_name is None:
+            # The filename-only fallback never recognizes extras -- it only
+            # matches the "Show Name S01E02" convention, which a bonus-
+            # content file never happens to look like.
             show_name, season_number, episode_number = _parse_show_episode(path.stem)
-        info["show_name"], info["season_number"], info["episode_number"] = (
-            show_name, season_number, episode_number,
+            is_extra = False
+        info["show_name"], info["season_number"], info["episode_number"], info["is_extra"] = (
+            show_name, season_number, episode_number, is_extra,
         )
 
         # Only a fallback for files that aren't part of a recognized show --
@@ -243,6 +250,13 @@ def _extract_metadata(path: Path, media_type: str, media_root: Path = None, is_m
         # be the only video there (show_name is already set above by then).
         if show_name is None and is_movie_folder:
             info["title"] = path.parent.name
+
+        # A video belongs in the Movies grid when it isn't part of any show
+        # (grouped or not) and isn't bonus content -- this deliberately keeps
+        # a loose/ungrouped standalone video (no season structure at all)
+        # counted as a movie, same as it's always been treated, just
+        # persisted now instead of inferred at query time.
+        info["is_movie"] = show_name is None and not is_extra
 
     return info
 
@@ -279,6 +293,34 @@ def _parse_show_episode(stem: str):
 # rejected -- same "don't guess wrong" policy as _SHOW_EPISODE_RE.
 _SEASON_FOLDER_RE = re.compile(r"^(?:season\s*(?P<s1>\d{1,2})|s(?P<s2>\d{1,2}))$", re.IGNORECASE)
 
+# Full-match against a folder name -- these are physical "bucket" folders
+# for bonus/extra content (Featurettes, Deleted Scenes, etc.), so a full
+# match is much safer here than a filename substring check. Deliberately
+# excludes bare "specials"/"special" -- that's the existing Plex/Jellyfin
+# convention for a season-0 folder of real episodes, a different concept
+# from bonus "special features".
+_EXTRAS_FOLDER_RE = re.compile(
+    r"^(?:extras?|featurettes?|deleted\s+scenes?|behind\s+the\s+scenes?|"
+    r"gag\s+reels?|interviews?|(?:the\s+)?making\s+of|"
+    r"bonus(?:\s+features?)?|special\s+features?|bloopers?|outtakes?)$",
+    re.IGNORECASE,
+)
+
+# Trailing-token match against a filename stem, same style as
+# _TRAILER_SAMPLE_RE below -- a fallback for a loose extras file that has no
+# bucket folder of its own (e.g. sitting directly in a season folder next
+# to real episodes). Deliberately narrower than _EXTRAS_FOLDER_RE's word
+# list: bare "interview"/"bonus"/"extra" are excluded here since they're too
+# likely to collide with a real title in trailing position (e.g. "The
+# Interview.mkv" is a real 2014 movie) -- only multi-word, unambiguous
+# phrases are matched by filename alone.
+_EXTRAS_FILENAME_RE = re.compile(
+    r"(?:^|[\W_])(?:featurettes?|deleted[\W_]+scenes?|behind[\W_]+the[\W_]+scenes?|"
+    r"gag[\W_]+reels?|(?:the[\W_]+)?making[\W_]+of|bonus[\W_]+features?|"
+    r"special[\W_]+features?|bloopers?|outtakes?)[\W_\d]*$",
+    re.IGNORECASE,
+)
+
 # A video whose name ends in "trailer"/"sample" (optionally pluralized or
 # followed by digits/punctuation, e.g. "trailer1", "Inception-trailer",
 # "samples") is excluded from the library entirely. End-anchored rather
@@ -314,37 +356,105 @@ def _parse_episode_in_stem(stem: str):
     return None
 
 
+def _find_show_dir_above_extras(extras_dir: Path, media_root: Path):
+    """Starting from a folder recognized as an extras bucket (Featurettes,
+    Deleted Scenes, etc.), walk up past any season-folder or further
+    extras-bucket ancestors to find the real show folder above them.
+    Returns None if the walk reaches media_root without finding one."""
+    candidate = extras_dir.parent
+    while candidate != media_root:
+        name = candidate.name.strip()
+        if not name:
+            return None
+        if _SEASON_FOLDER_RE.fullmatch(name) or _EXTRAS_FOLDER_RE.fullmatch(name):
+            candidate = candidate.parent
+            continue
+        return candidate
+    return None
+
+
+def _has_season_subfolder(folder: Path):
+    try:
+        return any(
+            _SEASON_FOLDER_RE.fullmatch(child.name.strip())
+            for child in folder.iterdir() if child.is_dir()
+        )
+    except OSError:
+        return False
+
+
 def _parse_folder_show_episode(path: Path, media_root: Path):
     """Detect the Plex/Jellyfin-style "<Show>/<Season Folder>/<episode
-    file>" convention. Returns (show_name, season_number, episode_number),
-    all None if the structure doesn't unambiguously match -- callers should
-    fall back to _parse_show_episode(path.stem) in that case, never mix
-    partial results. Only ever looks at the immediate parent folder, so an
-    Extras/Behind the Scenes folder nested inside a season folder is
-    correctly left ungrouped rather than misread as an episode."""
+    file>" convention, plus TV-show bonus/extra content living in a bucket
+    folder (Featurettes, Deleted Scenes, Behind the Scenes, ...) anywhere
+    under the show. Returns (show_name, season_number, episode_number,
+    is_extra) -- show_name is None if the structure doesn't unambiguously
+    match anything here, in which case callers should fall back to
+    _parse_show_episode(path.stem), never mixing partial results."""
     season_dir = path.parent
+
+    # Case 1: the immediate parent IS an extras bucket, e.g.
+    # "<Show>/Featurettes/file.mkv" or "<Show>/Season 03/Deleted Scenes/file.mkv".
+    if _EXTRAS_FOLDER_RE.fullmatch(season_dir.name.strip()):
+        show_dir = _find_show_dir_above_extras(season_dir, media_root)
+        if show_dir is None:
+            return None, None, None, False
+        # Guard against a movie's own bonus-features folder being mistaken
+        # for a TV show -- only trust this walk-up when the resolved folder
+        # actually has a real season subfolder somewhere. A real
+        # season-organized show will have that; a movie's own folder (e.g.
+        # "Movie (2010)/Special Features/") never will. Without this check,
+        # "Movie (2010)/Special Features/bonus.mkv" would fabricate a
+        # phantom one-episode "TV show" called "Movie (2010)".
+        if not _has_season_subfolder(show_dir):
+            return None, None, None, False
+        show_name = show_dir.name.strip()
+        if not show_name:
+            return None, None, None, False
+        return show_name, None, None, True
+
     match = _SEASON_FOLDER_RE.fullmatch(season_dir.name.strip())
     if not match:
-        return None, None, None
+        return None, None, None, False
 
     show_dir = season_dir.parent
+
+    # Case 2: what looks like the show folder is itself an extras bucket --
+    # the "Featurettes/Season 10/file.mkv" shape. This "season" folder
+    # isn't a season of the show at all, it's a season-mirrored subfolder
+    # inside an extras bucket -- walk further up to the real show, and
+    # discard the season/episode number entirely since this is bonus
+    # content, not a real episode.
+    if _EXTRAS_FOLDER_RE.fullmatch(show_dir.name.strip()):
+        real_show_dir = _find_show_dir_above_extras(show_dir, media_root)
+        if real_show_dir is None:
+            return None, None, None, False
+        show_name = real_show_dir.name.strip()
+        if not show_name:
+            return None, None, None, False
+        return show_name, None, None, True
+
     # A season folder sitting directly under a configured library root has
     # no distinct show folder above it -- using the library root's own name
     # ("TV", "Media", ...) as the show name would be worse than not
     # grouping at all.
     if show_dir == media_root:
-        return None, None, None
+        return None, None, None, False
 
     show_name = show_dir.name.strip()
     if not show_name:
-        return None, None, None
+        return None, None, None, False
 
     season_number = int(match.group("s1") or match.group("s2"))
     episode_number = _parse_episode_in_stem(path.stem)
     if episode_number is None:
-        return None, None, None
+        # A loose extras file sitting directly in a season folder with no
+        # bucket subfolder of its own (e.g. "Season 01/Gag Reel.mkv").
+        if _EXTRAS_FILENAME_RE.search(path.stem):
+            return show_name, None, None, True
+        return None, None, None, False
 
-    return show_name, season_number, episode_number
+    return show_name, season_number, episode_number, False
 
 
 def _probe_video_info(path: Path):
