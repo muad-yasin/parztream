@@ -14,6 +14,18 @@ logger = logging.getLogger("parztream")
 COMPATIBLE_VIDEO_CODECS = {"h264", "vp8", "vp9", "av1"}
 COMPATIBLE_AUDIO_CODECS = {"aac", "mp3", "opus", "vorbis"}
 
+# Chromium's <video>/MediaSource AAC decoder rejects multichannel (>2
+# channel) AAC outright -- confirmed live: a 5.1 AAC track appended via
+# hls.js fails with "PipelineStatus::CHUNK_DEMUXER_ERROR_APPEND_FAILED:
+# RunSegmentParserLoop: stream parsing failed", even though the exact same
+# .ts segment is completely valid per ffprobe/ffmpeg's own (much more
+# permissive) decoder -- this is a real browser limitation, not a bug in
+# the segment. A codec name alone being in COMPATIBLE_AUDIO_CODECS isn't
+# enough for AAC specifically; it also has to be within this channel cap,
+# or it needs routing through the real transcode path (see
+# resolve_playable_path/_start_job), which downmixes to stereo.
+MAX_DIRECT_PLAY_AUDIO_CHANNELS = 2
+
 # Containers browsers can open directly, independent of what's inside.
 DIRECT_PLAY_CONTAINERS = {".mp4", ".webm"}
 
@@ -145,6 +157,7 @@ def resolve_playable_path(row) -> Path:
 
     video_codec = row["video_codec"]
     audio_codec = row["audio_codec"]
+    audio_channels = row["audio_channels"]
 
     # No codec info yet (ffprobe unavailable at scan time, or this row was
     # scanned before this feature existed) -- don't guess, just direct play
@@ -153,7 +166,15 @@ def resolve_playable_path(row) -> Path:
         return path
 
     video_ok = video_codec.lower() in COMPATIBLE_VIDEO_CODECS
-    audio_ok = audio_codec is None or audio_codec.lower() in COMPATIBLE_AUDIO_CODECS
+    # audio_channels is None either for a row scanned before this column
+    # existed, or a genuinely unknown channel count -- same "don't newly
+    # block something that used to work" reasoning as video_codec is None
+    # above, so it's treated as fine rather than forcing an unnecessary
+    # remux.
+    audio_ok = audio_codec is None or (
+        audio_codec.lower() in COMPATIBLE_AUDIO_CODECS
+        and (audio_channels is None or audio_channels <= MAX_DIRECT_PLAY_AUDIO_CHANNELS)
+    )
     container_ok = path.suffix.lower() in DIRECT_PLAY_CONTAINERS
 
     if video_ok and audio_ok and container_ok:
@@ -331,19 +352,26 @@ def _highest_contiguous_segment(hls_dir: Path, start: int) -> int:
 def ensure_segment(
     media_id: int, src_path: Path, remux_audio: bool, index: int,
     reencode_video: bool = False, video_width=None, video_height=None,
+    audio_stream_index=None,
 ) -> Path:
     """Block until segment `index` is fully written to disk for this media
     (starting or reusing an ffmpeg job that produces it), then return its
     path. This is what makes seeking work during an in-progress conversion:
     a request for any segment index -- sequential or a forward/backward
     jump -- either finds it already cached, joins a job already headed
-    there, or kicks off a new one seeked directly to that point."""
+    there, or kicks off a new one seeked directly to that point.
+    audio_stream_index (the scanner's chosen audio track, see
+    app/scanner.py's _choose_audio_stream) is passed through to _start_job
+    so the track actually served is guaranteed to be the same one
+    resolve_playable_path validated -- not whatever ffmpeg's own default
+    stream-selection heuristic would otherwise pick."""
     hls_dir = hls_dir_for(media_id)
     hls_dir.mkdir(parents=True, exist_ok=True)
     target = _segment_path(hls_dir, index)
 
     job = _find_or_start_job(
         hls_dir, src_path, remux_audio, index, reencode_video, video_width, video_height,
+        audio_stream_index,
     )
     if job is None:
         # No active job could still be writing this file -- either a past
@@ -380,6 +408,7 @@ def ensure_segment(
 def _find_or_start_job(
     hls_dir: Path, src_path: Path, remux_audio: bool, index: int,
     reencode_video: bool = False, video_width=None, video_height=None,
+    audio_stream_index=None,
 ):
     """Returns the _Job that will (eventually) produce `index`, or None if
     the segment is already complete on disk with no active job that could
@@ -394,7 +423,10 @@ def _find_or_start_job(
                 return job_or_done
             if not reencode_video:
                 _terminate_stale_jobs(hls_dir)
-                job = _start_job(hls_dir, src_path, remux_audio, index, False, video_width, video_height)
+                job = _start_job(
+                    hls_dir, src_path, remux_audio, index, False, video_width, video_height,
+                    audio_stream_index,
+                )
                 _jobs[hls_dir].append(job)
                 return job
             # Don't acquire the (possibly-blocking) transcode semaphore
@@ -416,6 +448,7 @@ def _find_or_start_job(
             try:
                 job = _start_job(
                     hls_dir, src_path, remux_audio, index, True, video_width, video_height,
+                    audio_stream_index,
                 )
             except Exception:
                 # _start_job can fail before ever spawning a process (see
@@ -451,13 +484,38 @@ def _check_jobs_locked(hls_dir: Path, index: int):
 def _start_job(
     hls_dir: Path, src_path: Path, remux_audio: bool, start_index: int,
     reencode_video: bool = False, video_width=None, video_height=None,
+    audio_stream_index=None,
 ) -> "_Job":
     """Caller is responsible for holding a transcode-semaphore slot already
     (see _find_or_start_job) when reencode_video is True -- this function
     only spawns the process and never blocks."""
-    audio_args = ["-c:a", "aac"] if remux_audio else ["-c:a", "copy"]
+    # -ac 2: whenever audio is actually transcoded, always downmix to
+    # stereo -- Chromium's MSE AAC decoder rejects anything above 2
+    # channels outright (confirmed real, see MAX_DIRECT_PLAY_AUDIO_CHANNELS
+    # above), so a straight "-c:a aac" on a 5.1/7.1 source would produce a
+    # multichannel AAC track that's valid per ffprobe but unplayable in a
+    # real browser. A no-op for a source that's already stereo/mono.
+    audio_args = ["-c:a", "aac", "-ac", "2"] if remux_audio else ["-c:a", "copy"]
     seek_args = ["-ss", str(start_index * SEGMENT_SECONDS)] if start_index else []
     segment_pattern = str(hls_dir / "segment_%05d.ts")
+
+    # Explicit -map: without this, ffmpeg falls back to its own default
+    # stream-selection heuristic (for audio, not simply "first" -- it
+    # tends to prefer the highest channel count), which can silently
+    # disagree with the stream app/scanner.py's _choose_audio_stream
+    # already validated for compatibility/language -- e.g. serving a
+    # foreign-language or commentary track instead of the English one that
+    # was actually checked. audio_stream_index is None for a row scanned
+    # before this existed or a file with no audio at all -- map_args stays
+    # empty in that case (not just the audio -map) so ffmpeg's default
+    # auto-selection still picks both video and audio itself, exactly as
+    # before this existed. A -map for only one stream type is deliberately
+    # never used: -map restricts the output to *only* what's explicitly
+    # mapped, so "-map 0:v:0" alone would silently drop audio entirely
+    # rather than falling back to auto-selecting it.
+    map_args = []
+    if audio_stream_index is not None:
+        map_args = ["-map", "0:v:0", "-map", f"0:a:{audio_stream_index}"]
 
     pre_input_args = []
     if reencode_video:
@@ -491,6 +549,7 @@ def _start_job(
         *pre_input_args,
         *seek_args,
         "-i", str(src_path),
+        *map_args,
         *video_args, *audio_args,
         "-f", "segment",
         "-segment_time", str(SEGMENT_SECONDS),

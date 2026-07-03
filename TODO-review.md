@@ -176,6 +176,28 @@ genuinely can't fix (see TS_SAFE_VIDEO_CODECS).
   the packet-scan duration fallback is cached across rescans (see git
   log), but still a real gap if ffprobe genuinely can't read a file at
   all.
+- [ ] **PB7. `canPlayType("application/vnd.apple.mpegurl")` truthiness
+  no longer reliably means "Safari, use native HLS" — confirmed to
+  misfire on a real, current Chromium build.** `static/app.js`'s
+  `playMedia()` branches on `el.canPlayType(...)` being truthy to decide
+  between native HLS (`el.src = hlsPlaylistUrl`, meant for Safari) and
+  hls.js (`new Hls(); hls.loadSource(...); hls.attachMedia(...)`).
+  Confirmed live: a recent Chromium build also returns `"maybe"` for that
+  MIME type (Chromium's own experimental/partial native HLS rollout), so
+  it takes the Safari branch too and skips hls.js's JS-based MPEG-TS
+  transmuxing entirely. Chromium's native path doesn't handle this app's
+  legacy MPEG-TS segments correctly on that browser — real playback
+  failure (`MEDIA_ERR_DECODE`) for a file that hls.js decodes perfectly:
+  identical playlist/segments played flawlessly the moment hls.js was
+  used explicitly instead of letting `canPlayType` bypass it. Found while
+  browser-verifying the multichannel-AAC fix (see git log) — the
+  channel/mapping fix itself is confirmed correct via hls.js; this is a
+  separate, pre-existing bug in the player's engine-selection logic that
+  was just masking that verification. Fix direction: don't trust
+  `canPlayType` truthiness alone to select the native-HLS branch — e.g.
+  prefer `Hls.isSupported()` whenever it's true and only fall back to
+  native `el.src` when hls.js genuinely isn't available, inverting
+  today's priority order.
 
 ## Poor performance
 

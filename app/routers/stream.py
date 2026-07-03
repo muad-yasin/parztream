@@ -156,6 +156,7 @@ def stream_hls_segment(media_id: int, segment_name: str):
         segment_path = transcode.ensure_segment(
             media_id, original_path, remux_audio, index,
             reencode_video, row["video_width"], row["video_height"],
+            row["audio_stream_index"],
         )
     except transcode.RemuxFailed as exc:
         logger.error("Remux failed for media %s: %s", media_id, exc)

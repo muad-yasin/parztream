@@ -21,6 +21,7 @@ def _row(**overrides):
         "media_type": "video",
         "video_codec": None,
         "audio_codec": None,
+        "audio_channels": None,
     }
     base.update(overrides)
     return base
@@ -139,6 +140,44 @@ def test_incompatible_audio_raises_needs_hls_remux_with_remux_audio_true(tmp_pat
     assert exc_info.value.remux_audio is True
 
 
+def test_multichannel_aac_is_not_treated_as_direct_playable(tmp_path):
+    # Regression test: an *already*-AAC track that's multichannel (e.g. a
+    # real "AAC 5.1" release) used to be treated as "compatible codec,
+    # just copy it" purely by codec name -- but Chromium's MediaSource AAC
+    # decoder rejects multichannel AAC outright (confirmed live), so this
+    # must route through the real audio-transcode path (which downmixes),
+    # not a blind stream-copy.
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(b"x")
+    row = _row(path=str(f), video_codec="h264", audio_codec="aac", audio_channels=6)
+
+    with pytest.raises(transcode.NeedsHlsRemux) as exc_info:
+        transcode.resolve_playable_path(row)
+    assert exc_info.value.remux_audio is True
+
+
+def test_stereo_aac_still_direct_plays(tmp_path):
+    # Regression guard: the multichannel check above must not affect the
+    # common, already-fine case.
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(b"x")
+    row = _row(path=str(f), video_codec="h264", audio_codec="aac", audio_channels=2)
+
+    assert transcode.resolve_playable_path(row) == f
+
+
+def test_aac_with_unknown_channel_count_still_direct_plays(tmp_path):
+    # audio_channels=None (a row scanned before this column existed, or a
+    # file ffprobe couldn't determine channels for) must not newly block
+    # something that used to work -- same "don't guess wrong" reasoning as
+    # video_codec is None elsewhere in this function.
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(b"x")
+    row = _row(path=str(f), video_codec="h264", audio_codec="aac", audio_channels=None)
+
+    assert transcode.resolve_playable_path(row) == f
+
+
 @pytest.mark.parametrize("codec", ["vp9", "av1", "vp8"])
 def test_ts_unsafe_codec_in_wrong_container_is_unsupported_not_a_broken_remux(tmp_path, codec):
     # Regression test: vp8/vp9/av1 are browser-playable codecs (video_ok is
@@ -245,6 +284,92 @@ def test_incompatible_audio_gets_transcoded_while_video_is_copied(tmp_path, monk
     )
     assert "h264,video" in probe.stdout
     assert "aac,audio" in probe.stdout
+
+
+@requires_ffmpeg
+def test_multichannel_audio_is_downmixed_to_stereo_when_transcoded(tmp_path, monkeypatch):
+    # Regression test for the real playback bug this fixed: Chromium's
+    # MediaSource AAC decoder rejects multichannel (>2 channel) AAC
+    # outright (confirmed live against a real browser -- "
+    # CHUNK_DEMUXER_ERROR_APPEND_FAILED"), even though the exact same
+    # segment is completely valid per ffprobe/ffmpeg's own decoder. A
+    # straight "-c:v copy -c:a aac" on a 5.1 source stays 6-channel AAC and
+    # silently produces a segment that looks fine here but never actually
+    # plays in a real browser.
+    mkv_path = tmp_path / "clip_51.mkv"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-filter_complex", "[1:a]pan=5.1|FL=c0|FR=c0|FC=c0|LFE=c0|BL=c0|BR=c0[a51]",
+            "-map", "0:v", "-map", "[a51]",
+            "-c:v", "libx264", "-c:a", "ac3", "-shortest",
+            str(mkv_path),
+        ],
+        check=True,
+    )
+
+    segment = transcode.ensure_segment(8, mkv_path, remux_audio=True, index=0, audio_stream_index=0)
+
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=codec_name,channels",
+            "-of", "csv=p=0", str(segment),
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    # .ts (MPEG-TS) containers can report stream info more than once (PMT/PID
+    # quirk) -- the first non-empty line is enough to confirm the downmix.
+    first_line = next(line for line in probe.stdout.splitlines() if line.strip())
+    codec, channels = first_line.split(",")
+    assert codec == "aac"
+    assert int(channels) <= transcode.MAX_DIRECT_PLAY_AUDIO_CHANNELS
+
+
+def test_start_job_maps_explicit_video_and_audio_streams_when_index_known(monkeypatch):
+    captured_cmd = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        return _FakeProcess(lambda: (b"", b"", 0))
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        transcode._start_job(
+            Path("/tmp/some_hls_dir"), Path("/media/clip.mkv"), remux_audio=True,
+            start_index=0, audio_stream_index=2,
+        )
+
+    cmd = captured_cmd["cmd"]
+    assert "-map" in cmd
+    map_positions = [i for i, arg in enumerate(cmd) if arg == "-map"]
+    mapped_values = [cmd[i + 1] for i in map_positions]
+    assert mapped_values == ["0:v:0", "0:a:2"]
+    assert "-ac" in cmd
+    assert cmd[cmd.index("-ac") + 1] == "2"
+
+
+def test_start_job_omits_map_entirely_when_audio_stream_index_unknown(monkeypatch):
+    # Regression test: a bare "-map 0:v:0" with no matching audio -map
+    # would restrict the output to video only and silently drop audio --
+    # -map must either cover both streams or be omitted entirely so
+    # ffmpeg's own default auto-selection picks both, exactly as before
+    # this feature existed (e.g. for a row scanned before this column was
+    # added).
+    captured_cmd = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        return _FakeProcess(lambda: (b"", b"", 0))
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        transcode._start_job(
+            Path("/tmp/some_hls_dir"), Path("/media/clip.mkv"), remux_audio=True,
+            start_index=0, audio_stream_index=None,
+        )
+
+    assert "-map" not in captured_cmd["cmd"]
 
 
 @requires_ffmpeg

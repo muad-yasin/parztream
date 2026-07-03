@@ -132,10 +132,21 @@ def scan_media_dirs():
                 # "is" the movie. Excludes an extras-bucket folder itself
                 # (e.g. "Movie (2010)/Special Features/bonus.mkv") -- that
                 # single video is bonus content, not a second movie titled
-                # after its bucket folder's name.
+                # after its bucket folder's name. Also excludes the
+                # configured library root itself -- a loose movie file
+                # sitting directly there (no dedicated subfolder at all,
+                # e.g. "Movies/Braveheart.1995....mkv") has no distinct
+                # movie folder above it, so its title would otherwise get
+                # overwritten with the *library root's own name*
+                # ("Movies") instead of anything derived from the file --
+                # confirmed live on a real collection. Same reasoning as
+                # the equivalent guard for a season folder sitting
+                # directly under the library root in
+                # _parse_folder_show_episode.
                 is_movie_folder = (
                     not has_season_subfolder and len(video_paths) == 1
                     and not _EXTRAS_FOLDER_RE.fullmatch(root_path.name.strip())
+                    and root_path != media_dir
                 )
 
                 for path in video_paths:
@@ -216,16 +227,19 @@ def _upsert_media(conn, path: Path, media_type: str, media_root: Path = None, is
         INSERT INTO media
             (path, media_type, title, artist, album, duration, size_bytes,
              video_codec, audio_codec, video_width, video_height,
+             audio_channels, audio_stream_index,
              show_name, season_number, episode_number, is_movie, is_extra)
         VALUES
             (:path, :media_type, :title, :artist, :album, :duration, :size_bytes,
              :video_codec, :audio_codec, :video_width, :video_height,
+             :audio_channels, :audio_stream_index,
              :show_name, :season_number, :episode_number, :is_movie, :is_extra)
         ON CONFLICT(path) DO UPDATE SET
             title=excluded.title, artist=excluded.artist, album=excluded.album,
             duration=excluded.duration, size_bytes=excluded.size_bytes,
             video_codec=excluded.video_codec, audio_codec=excluded.audio_codec,
             video_width=excluded.video_width, video_height=excluded.video_height,
+            audio_channels=excluded.audio_channels, audio_stream_index=excluded.audio_stream_index,
             show_name=excluded.show_name, season_number=excluded.season_number,
             episode_number=excluded.episode_number, is_movie=excluded.is_movie,
             is_extra=excluded.is_extra
@@ -248,6 +262,8 @@ def _extract_metadata(
         "audio_codec": None,
         "video_width": None,
         "video_height": None,
+        "audio_channels": None,
+        "audio_stream_index": None,
         "show_name": None,
         "season_number": None,
         "episode_number": None,
@@ -274,6 +290,7 @@ def _extract_metadata(
         (
             info["duration"], info["video_codec"], info["audio_codec"],
             info["video_width"], info["video_height"],
+            info["audio_channels"], info["audio_stream_index"],
         ) = _probe_video_info(path, cached_duration)
 
         show_name, season_number, episode_number, is_extra = (None, None, None, False)
@@ -513,27 +530,38 @@ def _parse_folder_show_episode(path: Path, media_root: Path):
 
 
 def _probe_video_info(path: Path, cached_duration: float = None):
-    """Return (duration, video_codec, audio_codec, width, height) via a
-    single ffprobe call. video_codec/audio_codec are the *first* video/audio
-    stream's codec name (e.g. "h264", "ac3"), used by app/transcode.py to
-    decide whether a file can be played directly in a browser. width/height
-    are the first video stream's dimensions, used by app/transcode.py to
-    decide whether a re-encode needs to scale down to fit the resolution
-    cap. cached_duration, when given (see _upsert_media), skips the
-    expensive packet-scan fallback below entirely by reusing a previous
-    scan's result for this same file."""
+    """Return (duration, video_codec, audio_codec, width, height,
+    audio_channels, audio_stream_index) via a single ffprobe call.
+    video_codec/width/height are the *first* video stream's info. The
+    audio fields describe one *chosen* audio stream, not necessarily the
+    first one in the file -- see _choose_audio_stream, which prefers an
+    English-tagged track over a differently-tagged one (an untagged track
+    is never treated as "wrong", since most rips simply don't tag
+    language at all). audio_stream_index is that stream's position among
+    audio streams only (0-based, e.g. 1 means "the second audio track"),
+    suitable for ffmpeg's `-map 0:a:N` -- app/transcode.py's _start_job
+    uses it to guarantee the stream it actually serves is the same one
+    validated here, instead of leaving stream selection to ffmpeg's own
+    default heuristic (confirmed real: without an explicit -map, ffmpeg's
+    default pick can differ from the first/chosen stream here, silently
+    serving a different audio track -- e.g. a commentary or foreign-
+    language track -- than the one the compatibility check was based on).
+    cached_duration, when given (see _upsert_media), skips the expensive
+    packet-scan fallback below entirely by reusing a previous scan's
+    result for this same file."""
     try:
         result = subprocess.run(
             [
                 "ffprobe", "-v", "error",
-                "-show_entries", "format=duration:stream=codec_type,codec_name,width,height",
+                "-show_entries",
+                "format=duration:stream=codec_type,codec_name,width,height,channels:stream_tags=language",
                 "-of", "json", str(path),
             ],
             capture_output=True, text=True, timeout=10,
         )
         data = json.loads(result.stdout)
     except (FileNotFoundError, subprocess.SubprocessError, json.JSONDecodeError):
-        return None, None, None, None, None
+        return None, None, None, None, None, None, None
 
     duration = None
     try:
@@ -542,21 +570,56 @@ def _probe_video_info(path: Path, cached_duration: float = None):
         pass
 
     video_codec = None
-    audio_codec = None
     width = None
     height = None
+    audio_streams = []  # each: (position_among_audio, codec_name, channels, language)
     for stream in data.get("streams", []):
         if stream.get("codec_type") == "video" and video_codec is None:
             video_codec = stream.get("codec_name")
             width = stream.get("width")
             height = stream.get("height")
-        elif stream.get("codec_type") == "audio" and audio_codec is None:
-            audio_codec = stream.get("codec_name")
+        elif stream.get("codec_type") == "audio":
+            audio_streams.append((
+                len(audio_streams),
+                stream.get("codec_name"),
+                stream.get("channels"),
+                (stream.get("tags") or {}).get("language"),
+            ))
+
+    audio_codec = None
+    audio_channels = None
+    audio_stream_index = None
+    chosen = _choose_audio_stream(audio_streams)
+    if chosen is not None:
+        audio_stream_index, audio_codec, audio_channels, _language = chosen
 
     if duration is None:
         duration = cached_duration if cached_duration is not None else _probe_duration_via_packets(path)
 
-    return duration, video_codec, audio_codec, width, height
+    return duration, video_codec, audio_codec, width, height, audio_channels, audio_stream_index
+
+
+_ENGLISH_LANGUAGE_TAGS = {"eng", "en"}
+
+
+def _choose_audio_stream(audio_streams: list):
+    """Pick one audio stream to use when a file has several (main
+    language, dubs, director's commentary, ...). Priority: (1) tagged as
+    English, (2) not tagged with any language at all -- most rips simply
+    don't tag it, which must never be treated as "wrong" -- (3) first
+    stream, whatever language it's tagged. Deliberately doesn't try to
+    detect "commentary" from a track's title text -- that's a real scope
+    cut (fragile to get right), not an oversight; two same-language
+    tracks are disambiguated only by which one came first."""
+    if not audio_streams:
+        return None
+    for entry in audio_streams:
+        if (entry[3] or "").lower() in _ENGLISH_LANGUAGE_TAGS:
+            return entry
+    for entry in audio_streams:
+        if not entry[3]:
+            return entry
+    return audio_streams[0]
 
 
 def _probe_duration_via_packets(path: Path):

@@ -28,6 +28,8 @@ def _metadata(**overrides):
         "audio_codec": None,
         "video_width": None,
         "video_height": None,
+        "audio_channels": None,
+        "audio_stream_index": None,
         "show_name": None,
         "season_number": None,
         "episode_number": None,
@@ -115,7 +117,7 @@ def test_unavailable_media_dir_does_not_wipe_its_existing_rows(monkeypatch, tmp_
 
 
 def test_scan_movie_bonus_content_is_not_a_fake_movie(make_file, monkeypatch):
-    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None))
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None, None, 0))
     make_file("Movies/Movie (2010)/Movie.2010.mkv")
     make_file("Movies/Movie (2010)/Special Features/bonus.mkv")
 
@@ -194,7 +196,7 @@ def test_parse_show_episode(stem, expected):
 
 def test_scan_populates_show_fields_for_episode_style_filenames(make_file, monkeypatch):
     monkeypatch.setattr(
-        scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None)
+        scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None, None, 0)
     )
     make_file("The Chosen S01E02.mp4")
     make_file("random_clip.mp4")
@@ -377,7 +379,7 @@ def test_trailer_sample_regex(stem, is_trailer):
 
 
 def test_scan_populates_show_fields_from_season_folder_structure(make_file, monkeypatch):
-    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None))
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None, None, 0))
     make_file("TV/Breaking Bad/Season 1/Breaking Bad - S01E01 - Pilot.mkv")
 
     scanner.scan_media_dirs()
@@ -389,7 +391,7 @@ def test_scan_populates_show_fields_from_season_folder_structure(make_file, monk
 
 
 def test_scan_leading_number_episode_style_under_season_folder(make_file, monkeypatch):
-    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None))
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None, None, 0))
     make_file("TV/Better Call Saul/Season 01/01 - Uno.mkv")
 
     scanner.scan_media_dirs()
@@ -404,7 +406,7 @@ def test_scan_flat_filename_style_is_unaffected_by_folder_feature(make_file, mon
     # Regression: a plain "Show S01E02" filename directly in the scanned
     # root (no season subfolder at all) must keep resolving via the
     # existing filename-only regex, unchanged.
-    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None))
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None, None, 0))
     make_file("Old Show S01E02.mkv")
 
     scanner.scan_media_dirs()
@@ -416,7 +418,7 @@ def test_scan_flat_filename_style_is_unaffected_by_folder_feature(make_file, mon
 
 
 def test_scan_derives_movie_title_from_folder_name(make_file, monkeypatch):
-    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None))
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None, None, 0))
     make_file("Movies/Inception (2010)/Inception.2010.1080p.BluRay.x264-GROUP.mkv")
 
     scanner.scan_media_dirs()
@@ -428,8 +430,27 @@ def test_scan_derives_movie_title_from_folder_name(make_file, monkeypatch):
     assert row["is_extra"] == 0
 
 
+def test_scan_loose_movie_at_library_root_keeps_filename_title(make_file, monkeypatch):
+    # Regression test found on a real collection: a lone movie file sitting
+    # directly in the configured library root (no dedicated subfolder at
+    # all, e.g. "Braveheart.1995....mkv" loose alongside other folders)
+    # satisfied the same "one video, no season subfolder" condition as a
+    # real movie folder -- but path.parent for a root-level file *is* the
+    # library root itself, so its title got silently overwritten with the
+    # library root's own configured folder name (e.g. "Movies") instead of
+    # keeping anything derived from the actual filename.
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None, None, 0))
+    make_file("Braveheart.1995.Bluray.1080p.AV1.OPUS.5.1-UH.mkv")
+
+    scanner.scan_media_dirs()
+
+    row = _rows()[0]
+    assert row["title"] == "Braveheart.1995.Bluray.1080p.AV1.OPUS.5.1-UH"
+    assert row["is_movie"] == 1
+
+
 def test_scan_persists_is_movie_and_is_extra_flags(make_file, monkeypatch):
-    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None))
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None, None, 0))
     make_file("TV/Smallville/Season 01/Smallville - S01E01 - Pilot.mkv")
     make_file("TV/Smallville/Season 10/Smallville - S10E01 - Lazarus.mkv")
     make_file("TV/Smallville/Featurettes/Season 10/Homecoming.mkv")
@@ -450,10 +471,103 @@ def test_scan_persists_is_movie_and_is_extra_flags(make_file, monkeypatch):
     assert rows["song.mp3"]["is_extra"] == 0
 
 
+@pytest.mark.parametrize(
+    "audio_streams,expected_index",
+    [
+        # (position, codec, channels, language) tuples per stream.
+        # English present but not first -> still picked over French.
+        ([(0, "ac3", 6, "fre"), (1, "ac3", 6, "eng")], 1),
+        # No language tags at all -- untagged must not be treated as
+        # "wrong", first stream wins.
+        ([(0, "ac3", 6, None), (1, "ac3", 2, None)], 0),
+        # Only a non-English track exists -- fall back to first rather
+        # than dropping audio entirely.
+        ([(0, "ac3", 6, "fre")], 0),
+        # "en" (not just "eng") must also count as English.
+        ([(0, "ac3", 6, "jpn"), (1, "ac3", 2, "en")], 1),
+        # No audio streams at all.
+        ([], None),
+    ],
+)
+def test_choose_audio_stream(audio_streams, expected_index):
+    chosen = scanner._choose_audio_stream(audio_streams)
+    if expected_index is None:
+        assert chosen is None
+    else:
+        assert chosen[0] == expected_index
+
+
+@requires_ffmpeg
+def test_scan_picks_english_audio_track_over_earlier_non_english_one(make_file):
+    path = make_file("multitrack.mkv")
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=880:duration=1",
+            "-map", "0:v", "-map", "1:a", "-map", "2:a",
+            "-c:v", "libopenh264", "-c:a", "ac3",
+            "-metadata:s:a:0", "language=fre",
+            "-metadata:s:a:1", "language=eng",
+            str(path),
+        ],
+        check=True,
+    )
+
+    scanner.scan_media_dirs()
+
+    row = _rows()[0]
+    assert row["audio_stream_index"] == 1
+
+
+@requires_ffmpeg
+def test_scan_falls_back_to_first_track_when_no_english_available(make_file):
+    path = make_file("foreign_only.mkv")
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-c:v", "libopenh264", "-c:a", "ac3",
+            "-metadata:s:a:0", "language=fre",
+            str(path),
+        ],
+        check=True,
+    )
+
+    scanner.scan_media_dirs()
+
+    row = _rows()[0]
+    assert row["audio_stream_index"] == 0
+
+
+@requires_ffmpeg
+def test_scan_records_multichannel_audio_channel_count(make_file):
+    path = make_file("surround.mkv")
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-filter_complex", "[1:a]pan=5.1|FL=c0|FR=c0|FC=c0|LFE=c0|BL=c0|BR=c0[a51]",
+            "-map", "0:v", "-map", "[a51]",
+            "-c:v", "libopenh264", "-c:a", "ac3",
+            str(path),
+        ],
+        check=True,
+    )
+
+    scanner.scan_media_dirs()
+
+    row = _rows()[0]
+    assert row["audio_channels"] == 6
+
+
 def test_scan_leaves_ambiguous_multi_video_folder_titles_alone(make_file, monkeypatch):
     # Two real videos, no season structure -- can't tell which "is" the
     # movie, so filenames keep their existing titles.
-    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None))
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None, None, 0))
     make_file("Movies/Double Feature/Movie One.mkv")
     make_file("Movies/Double Feature/Movie Two.mkv")
 
@@ -464,7 +578,7 @@ def test_scan_leaves_ambiguous_multi_video_folder_titles_alone(make_file, monkey
 
 
 def test_scan_excludes_trailer_files_from_the_library(make_file, monkeypatch):
-    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None))
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None, None, 0))
     make_file("Movies/Inception (2010)/Inception.mkv")
     make_file("Movies/Inception (2010)/Inception-trailer.mkv")
 
@@ -479,7 +593,7 @@ def test_scan_excludes_trailer_files_from_the_library(make_file, monkeypatch):
 
 
 def test_scan_removes_previously_scanned_file_once_renamed_to_look_like_a_trailer(make_file, monkeypatch):
-    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None))
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None, None, 0))
     f = make_file("Movies/Inception (2010)/Inception.mkv")
     scanner.scan_media_dirs()
     assert len(_rows()) == 1
@@ -496,7 +610,7 @@ def test_scan_does_not_retitle_a_season_folder_with_only_one_episode_so_far(make
     # folder with exactly one real video and no season subfolders inside
     # it" -- must not be mistaken for a movie folder and retitled to the
     # season folder's own name.
-    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None))
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None, None, 0))
     make_file("TV/Breaking Bad/Season 3/Breaking Bad - S03E01 - No Mas.mkv")
 
     scanner.scan_media_dirs()
@@ -683,8 +797,8 @@ def test_incomplete_metadata_is_tracked_without_failing_the_file(make_file, monk
 
     def flaky_probe(path, *_):
         if path.name == "no_duration.mkv":
-            return None, None, None, None, None
-        return 100.0, "h264", "aac", 1920, 1080
+            return None, None, None, None, None, None, None
+        return 100.0, "h264", "aac", 1920, 1080, 2, 0
 
     monkeypatch.setattr(scanner, "_probe_video_info", flaky_probe)
     scanner.start_scan()
@@ -703,7 +817,7 @@ def test_incomplete_metadata_not_flagged_for_a_legitimately_silent_video(make_fi
     # A real video with no audio track has audio_codec=None without ffprobe
     # having failed at all -- must not be misreported as incomplete.
     make_file("silent.mkv")
-    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (100.0, "h264", None, None, None))
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (100.0, "h264", None, None, None, None, None))
 
     scanner.start_scan()
     scanner.scan_media_dirs()

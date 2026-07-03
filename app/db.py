@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS media (
     audio_codec TEXT,
     video_width INTEGER,
     video_height INTEGER,
+    audio_channels INTEGER,
+    audio_stream_index INTEGER,
     show_name TEXT,
     season_number INTEGER,
     episode_number INTEGER,
