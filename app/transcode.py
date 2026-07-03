@@ -17,6 +17,17 @@ COMPATIBLE_AUDIO_CODECS = {"aac", "mp3", "opus", "vorbis"}
 # Containers browsers can open directly, independent of what's inside.
 DIRECT_PLAY_CONTAINERS = {".mp4", ".webm"}
 
+# Of the browser-compatible video codecs above, only h264 can actually be
+# muxed into the MPEG-TS segments this module's on-demand HLS path produces
+# -- ffmpeg's mpegts muxer has no standard mapping for vp8/vp9/av1.
+# Confirmed real: routing one of those into a "-c:v copy -f mpegts" remux
+# job fails immediately (the ffmpeg process errors out, every segment
+# request for that file 500s/404s), not a degraded-but-working fallback.
+# Until fMP4 HLS segments (which can carry any of these) replace MPEG-TS
+# here, a vp8/vp9/av1 file inside a non-direct-play container (e.g. .mkv)
+# has no working playback path in this app at all -- see resolve_playable_path.
+TS_SAFE_VIDEO_CODECS = {"h264"}
+
 # Length of each on-demand HLS segment, in seconds. Short enough that a
 # forward seek into not-yet-generated territory only waits a few seconds
 # for one segment (stream-copy is fast), long enough not to spawn an
@@ -33,21 +44,50 @@ LOOKAHEAD_SEGMENTS = 3
 # bounded so a genuinely stuck/hung ffmpeg doesn't hang a request forever.
 SEGMENT_WAIT_TIMEOUT = 30
 
+# A job with no segment requested from it in this long is considered
+# abandoned -- the viewer navigated away or closed the tab -- and gets
+# terminated rather than running to end-of-file. Reaped opportunistically
+# (see _reap_idle_jobs_locked) whenever any segment request anywhere
+# touches _jobs_guard, not on a separate timer/thread.
+JOB_IDLE_TIMEOUT = 60
+
+# How long a request will wait for a free re-encode slot before giving up
+# (see TranscodeUnavailable). Without this, an abandoned re-encode job
+# holding the single default slot could block every other re-encode
+# request's thread indefinitely -- JOB_IDLE_TIMEOUT above is what actually
+# frees the slot in that case, this is just the bound on how long a still-
+# waiting request sits before being told to retry instead of hanging.
+TRANSCODE_SLOT_TIMEOUT = 30
+
 
 class UnsupportedVideoCodec(Exception):
-    """Raised when a video's codec itself (not just its container or audio
-    track) can't be played in a browser without a full re-encode. Carries
-    enough context (transcode_enabled) for callers to give a genuinely
-    actionable message instead of a dead-end "can't play this" -- the two
-    real causes (transcoding opt-in never turned on vs. turned on but no
-    working encoder on this machine) call for different next steps."""
+    """Raised when a video can't be played in a browser and this module has
+    no way to fix it. Two distinct reasons share this one exception (same
+    415 contract for callers) but need different messages:
+    reason="codec" -- the video codec itself needs a real re-encode, which
+    is either not enabled or not possible on this machine (see
+    transcode_enabled). reason="container" -- the video codec (vp8/vp9/av1)
+    is itself perfectly browser-playable, but this module's on-demand HLS
+    path can only mux h264 into the MPEG-TS segments it produces (see
+    TS_SAFE_VIDEO_CODECS) -- routing one of those into that remux path is a
+    guaranteed failure, not a degraded-but-working fallback, so it's
+    treated as unfixable here rather than attempted. transcode_enabled is
+    irrelevant to that case (it's a muxer limitation, not a missing
+    encoder), so its message never mentions the env var."""
 
-    def __init__(self, codec: str, transcode_enabled: bool = False):
+    def __init__(self, codec: str, transcode_enabled: bool = False, reason: str = "codec"):
         self.codec = codec
         self.transcode_enabled = transcode_enabled
+        self.reason = reason
         super().__init__(codec)
 
     def user_message(self) -> str:
+        if self.reason == "container":
+            return (
+                f"This file's video codec ('{self.codec}') is browser-playable, but its "
+                "container can't be repackaged into a working stream by this server yet "
+                "(only H.264 video can be) -- download it to play in another app instead."
+            )
         if self.transcode_enabled:
             return (
                 f"Video codec '{self.codec}' can't be played in a browser, and no working "
@@ -82,6 +122,15 @@ class NeedsHlsRemux(Exception):
 class RemuxFailed(Exception):
     """Raised/stored when an HLS segment-generation ffmpeg process exits
     non-zero. Carries ffmpeg's stderr output for diagnostics."""
+
+
+class TranscodeUnavailable(Exception):
+    """Raised when no re-encode slot freed up within TRANSCODE_SLOT_TIMEOUT
+    -- surfaced by app/routers/stream.py as a 503 so an overloaded server
+    tells the client to retry shortly instead of a request (and the sync
+    threadpool thread handling it) blocking indefinitely on the semaphore,
+    potentially for as long as an abandoned re-encode job takes to either
+    finish or get reaped by _reap_idle_jobs_locked."""
 
 
 def resolve_playable_path(row) -> Path:
@@ -123,6 +172,15 @@ def resolve_playable_path(row) -> Path:
                 raise NeedsHlsRemux(remux_audio=not audio_ok, reencode_video=True)
             raise UnsupportedVideoCodec(video_codec, transcode_enabled=True)
         raise UnsupportedVideoCodec(video_codec, transcode_enabled=False)
+
+    # video_ok is True here, but the container isn't -- only a codec this
+    # module's MPEG-TS-based remux can actually carry (see
+    # TS_SAFE_VIDEO_CODECS) can be fixed by that path. vp8/vp9/av1 in the
+    # wrong container has no working remux today -- treat it as unfixable
+    # rather than guaranteeing a broken playback attempt (see PB2/H2 in the
+    # code review this fixed).
+    if video_codec.lower() not in TS_SAFE_VIDEO_CODECS:
+        raise UnsupportedVideoCodec(video_codec, reason="container")
 
     raise NeedsHlsRemux(remux_audio=not audio_ok)
 
@@ -188,6 +246,17 @@ class _Job:
         self.reencode_video = reencode_video
         self.done = threading.Event()
         self.error: RemuxFailed | None = None
+        # Bumped every time a segment request is routed to this job (see
+        # _check_jobs_locked) -- used by _reap_idle_jobs_locked to find jobs
+        # nobody's actually waiting on anymore (the viewer navigated away or
+        # closed the tab) so they don't keep running/holding a transcode
+        # slot for the rest of the file.
+        self.last_requested = time.monotonic()
+        # Set just before this job is deliberately terminated to make way
+        # for a newer one (see _terminate_stale_jobs) or reaped as idle --
+        # tells _watch_job this isn't a real failure, so it doesn't log an
+        # error or set job.error for a kill this module itself initiated.
+        self.superseded = False
 
 
 _jobs_guard = threading.Lock()
@@ -203,6 +272,45 @@ _all_processes: set = set()
 # Stream-copy jobs (the existing container/audio-only remux) never touch
 # this semaphore at all -- they stay as cheap and uncapped as before.
 _transcode_semaphore = threading.Semaphore(config.MAX_CONCURRENT_TRANSCODES)
+
+
+def _reap_idle_jobs_locked():
+    """Must be called with _jobs_guard held. Terminates any job across ANY
+    hls_dir that hasn't had a segment requested from it in JOB_IDLE_TIMEOUT
+    -- called opportunistically at the top of every _find_or_start_job call
+    (i.e. on every real segment request, for any video), rather than on a
+    dedicated background thread/timer, matching this module's existing
+    request-driven style. Real consequence of not doing this: an abandoned
+    re-encode job runs to end-of-file, holding the transcode semaphore for
+    however much of the file is left and starving every other re-encode
+    request in the meantime."""
+    now = time.monotonic()
+    for jobs in _jobs.values():
+        for job in jobs:
+            if job.process.poll() is None and now - job.last_requested > JOB_IDLE_TIMEOUT:
+                job.superseded = True
+                job.process.terminate()
+
+
+def _terminate_stale_jobs(hls_dir: Path):
+    """Must be called with _jobs_guard held, right before starting a
+    genuinely new job for hls_dir (see _find_or_start_job) -- stops every
+    other still-running job for this same hls_dir first. Without this, an
+    old job (still seeking through content nobody's watching anymore after
+    a seek elsewhere) keeps running indefinitely and can race the new job
+    writing the same segment_%05d.ts paths: confirmed real that two -c:v
+    copy jobs started at different positions cut keyframe-aligned segments
+    differently, so "segment N" from each can have different byte content,
+    and ensure_segment's "next segment exists" completion check can then be
+    satisfied by the *other* job's file mid-write, serving a truncated
+    segment. A waiter still blocked on a job terminated this way gets a
+    clean FileNotFoundError/404 (see _watch_job) rather than a corrupted
+    file -- an accepted trade-off for a single-viewer-reseeks pattern,
+    which is what actually triggers this path in practice."""
+    for job in _jobs.get(hls_dir, []):
+        if job.process.poll() is None:
+            job.superseded = True
+            job.process.terminate()
 
 
 def _segment_path(hls_dir: Path, index: int) -> Path:
@@ -275,13 +383,17 @@ def _find_or_start_job(
 ):
     """Returns the _Job that will (eventually) produce `index`, or None if
     the segment is already complete on disk with no active job that could
-    still be writing to it (safe to serve immediately)."""
+    still be writing to it (safe to serve immediately). Raises
+    TranscodeUnavailable if reencode_video and no slot frees up within
+    TRANSCODE_SLOT_TIMEOUT."""
     while True:
         with _jobs_guard:
+            _reap_idle_jobs_locked()
             job_or_done = _check_jobs_locked(hls_dir, index)
             if job_or_done is not _NEED_NEW_JOB:
                 return job_or_done
             if not reencode_video:
+                _terminate_stale_jobs(hls_dir)
                 job = _start_job(hls_dir, src_path, remux_audio, index, False, video_width, video_height)
                 _jobs[hls_dir].append(job)
                 return job
@@ -291,7 +403,8 @@ def _find_or_start_job(
             # here would stall unrelated stream-copy requests too, not just
             # other re-encode ones.
 
-        _transcode_semaphore.acquire()
+        if not _transcode_semaphore.acquire(timeout=TRANSCODE_SLOT_TIMEOUT):
+            raise TranscodeUnavailable()
         with _jobs_guard:
             # Re-check: another thread may have started a covering job (or
             # the segment may now exist) while we were waiting for a slot.
@@ -299,9 +412,18 @@ def _find_or_start_job(
             if job_or_done is not _NEED_NEW_JOB:
                 _transcode_semaphore.release()  # didn't end up needing it
                 return job_or_done
-            job = _start_job(
-                hls_dir, src_path, remux_audio, index, True, video_width, video_height,
-            )
+            _terminate_stale_jobs(hls_dir)
+            try:
+                job = _start_job(
+                    hls_dir, src_path, remux_audio, index, True, video_width, video_height,
+                )
+            except Exception:
+                # _start_job can fail before ever spawning a process (see
+                # its encode_video_args None check) -- if it does, nothing
+                # will ever call _watch_job to release this slot, so it
+                # must be released right here instead of leaking forever.
+                _transcode_semaphore.release()
+                raise
             _jobs[hls_dir].append(job)
             return job
 
@@ -319,6 +441,7 @@ def _check_jobs_locked(hls_dir: Path, index: int):
     for job in alive:
         progress = _highest_contiguous_segment(hls_dir, job.start_index)
         if job.start_index <= index <= progress + 1 + LOOKAHEAD_SEGMENTS:
+            job.last_requested = time.monotonic()
             return job
     if _segment_path(hls_dir, index).is_file():
         return None
@@ -348,6 +471,18 @@ def _start_job(
         scale_args = _scale_args(video_width, video_height)
         scale_filter = scale_args[1] if scale_args else ""
         pre_input_args, video_args = encoder_detect.encode_video_args(encoder, video_width, video_height, scale_filter)
+        if pre_input_args is None:
+            # e.g. get_encoder() cached "h264_vaapi" earlier this process's
+            # life, but the render node it needs has since disappeared
+            # (device unplugged, permissions changed) -- get_encoder()
+            # won't re-probe, so this would otherwise recur on every
+            # re-encode request until restart. Fail this one job clearly
+            # instead of splatting None into the ffmpeg command below.
+            raise RemuxFailed(
+                f"Encoder '{encoder}' is no longer usable on this machine (its hardware "
+                "device may have disappeared after being detected earlier this run) -- "
+                "restart the server to re-detect a working encoder."
+            )
     else:
         video_args = ["-c:v", "copy"]  # today's exact stream-copy path, untouched
 
@@ -380,6 +515,16 @@ def _watch_job(job: "_Job", hls_dir: Path):
             _all_processes.discard(job.process)
         if job.reencode_video:
             _transcode_semaphore.release()
+    if job.superseded:
+        # Deliberately killed by _terminate_stale_jobs/_reap_idle_jobs_locked
+        # to make way for a newer job or because nobody was still watching
+        # it -- not a real failure, don't log an error or set job.error for
+        # a kill this module itself initiated. Any request still waiting on
+        # this specific job (see ensure_segment) gets a plain
+        # FileNotFoundError once job.done is set below, same as any other
+        # "job finished without producing this segment" case.
+        job.done.set()
+        return
     if job.process.returncode != 0:
         message = stderr.decode(errors="replace").strip() or f"ffmpeg exited {job.process.returncode}"
         logger.error(

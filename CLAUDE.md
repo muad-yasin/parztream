@@ -72,7 +72,14 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   tables: `media` and `settings` (a plain key/value store, currently
   just holding `media_dirs` as a JSON-encoded list). No migrations
   system yet — schema changes mean editing `SCHEMA` in this file
-  (existing dev DBs need to be deleted and rescanned).
+  (existing dev DBs need to be deleted and rescanned). `media` has
+  since grown `is_movie`/`is_extra` columns (both computed at scan
+  time, see `app/scanner.py`) for the Movies/TV-Shows poster-grid UI —
+  if you read further down and hit a note claiming a feature "needed
+  no DB schema change," that was true only at the point that specific
+  feature was written, not a claim about the schema's current state;
+  check `SCHEMA` itself, not prose, for what columns actually exist
+  today.
 - `app/scanner.py` — walks `settings.get_media_dirs()` via
   `os.walk(..., followlinks=False)` (not `Path.rglob`, deliberately: a
   plain glob would follow symlinks), and explicitly skips any entry

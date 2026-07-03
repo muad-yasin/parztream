@@ -56,6 +56,12 @@ def _persistent_secret_key(data_dir: Path) -> str:
         return existing
     key = secrets.token_hex(32)
     key_path.write_text(key)
+    try:
+        # Best-effort -- this signs every session cookie, so any other
+        # local account being able to read it could mint valid sessions.
+        os.chmod(key_path, 0o600)
+    except OSError:
+        pass
     return key
 
 

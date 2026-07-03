@@ -143,7 +143,13 @@
       if (res.ok) {
         const params = new URLSearchParams(window.location.search);
         const next = params.get("next");
-        window.location.href = next && next.startsWith("/") ? next : "/";
+        // startsWith("/") alone still passes a protocol-relative URL like
+        // "//evil.example" (browsers navigate that as https://evil.example)
+        // or a backslash variant like "/\evil.example" (some browsers
+        // normalize backslashes to slashes when parsing, turning it into
+        // the same thing) -- guard both explicitly.
+        const isSafeNext = next && next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/\\");
+        window.location.href = isSafeNext ? next : "/";
         return;
       }
 

@@ -39,18 +39,32 @@ _serializer = URLSafeTimedSerializer(SECRET_KEY, salt="parztream-session")
 # since a lockout has to apply *before* anyone's proven who they are.
 _MAX_ATTEMPTS = 5
 _LOCKOUT_SECONDS = 30
+# Doubled on every lockout for a given client (30s, 60s, 120s, ...), capped
+# here -- a flat 30s lockout still lets a steady attacker cover the entire
+# 10,000-PIN keyspace in well under a day from one IP, since nothing
+# actually gets harder for them over time. Reset to the base duration on
+# any successful login (see register_successful_attempt), since a real
+# user who just mistyped a few times shouldn't inherit an escalated
+# lockout on some future actual mistake.
+_MAX_LOCKOUT_SECONDS = 60 * 60
 _login_attempts: dict[str, dict] = {}
 
 
 def check_pin(pin: str) -> bool:
-    return secrets.compare_digest(pin, AUTH_PIN or "")
+    # secrets.compare_digest raises TypeError on non-ASCII str input --
+    # comparing UTF-8 bytes instead avoids that entirely (and is still a
+    # timing-safe comparison), so a PIN submission containing non-ASCII
+    # characters gets a normal 401 rather than a 500.
+    return secrets.compare_digest(pin.encode("utf-8"), (AUTH_PIN or "").encode("utf-8"))
 
 
 def register_failed_attempt(client_id: str) -> None:
-    record = _login_attempts.setdefault(client_id, {"count": 0, "locked_until": 0.0})
+    record = _login_attempts.setdefault(client_id, {"count": 0, "locked_until": 0.0, "lockouts": 0})
     record["count"] += 1
     if record["count"] >= _MAX_ATTEMPTS:
-        record["locked_until"] = time.monotonic() + _LOCKOUT_SECONDS
+        record["lockouts"] += 1
+        duration = min(_LOCKOUT_SECONDS * (2 ** (record["lockouts"] - 1)), _MAX_LOCKOUT_SECONDS)
+        record["locked_until"] = time.monotonic() + duration
         record["count"] = 0
 
 

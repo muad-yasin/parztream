@@ -163,7 +163,13 @@ def stream_hls_segment(media_id: int, segment_name: str):
             status_code=500,
             detail="Couldn't prepare this video for playback (conversion failed).",
         )
+    except transcode.TranscodeUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail="Server is busy transcoding other videos right now -- try again shortly.",
+        )
     except (FileNotFoundError, TimeoutError) as exc:
+        logger.warning("Segment %s for media %s unavailable: %s", index, media_id, exc)
         raise HTTPException(status_code=404, detail=str(exc))
 
     return FileResponse(segment_path, media_type="video/mp2t")

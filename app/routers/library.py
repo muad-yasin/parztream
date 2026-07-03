@@ -55,7 +55,10 @@ def list_media(
 
     where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
     # Within a show, episode order is more useful than alphabetical title.
-    order_by = "season_number, episode_number" if show_name else "title"
+    # COLLATE NOCASE: SQLite's default BINARY collation sorts all uppercase
+    # letters before all lowercase ones ("Zebra" before "apple"), which
+    # reads as broken alphabetical order to a user.
+    order_by = "season_number, episode_number" if show_name else "title COLLATE NOCASE"
 
     with get_connection() as conn:
         total = conn.execute(f"SELECT COUNT(*) FROM media{where}", params).fetchone()[0]
@@ -81,7 +84,7 @@ def list_shows():
             FROM media
             WHERE show_name IS NOT NULL AND is_extra = 0
             GROUP BY show_name
-            ORDER BY show_name
+            ORDER BY show_name COLLATE NOCASE
             """
         ).fetchall()
     return [dict(row) for row in rows]

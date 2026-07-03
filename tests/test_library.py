@@ -74,6 +74,31 @@ def test_list_media_limit_is_clamped_to_a_sane_range(client):
     assert too_small["limit"] == 1
 
 
+def test_list_media_sorts_case_insensitively(client, make_file):
+    # SQLite's default BINARY collation would sort "Zebra" before "apple"
+    # (all uppercase before all lowercase) -- that reads as broken
+    # alphabetical order to a user.
+    _insert_media(make_file("a.mp3"), title="apple")
+    _insert_media(make_file("b.mp3"), title="Banana")
+    _insert_media(make_file("c.mp3"), title="Zebra")
+
+    res = client.get("/api/library")
+
+    titles = [i["title"] for i in res.json()["items"]]
+    assert titles == ["apple", "Banana", "Zebra"]
+
+
+def test_list_shows_sorts_case_insensitively(client, make_file):
+    _insert_media(make_file("a.mp4"), "video", show_name="apple show", season_number=1, episode_number=1)
+    _insert_media(make_file("b.mp4"), "video", show_name="Banana Show", season_number=1, episode_number=1)
+    _insert_media(make_file("c.mp4"), "video", show_name="Zebra Show", season_number=1, episode_number=1)
+
+    res = client.get("/api/shows")
+
+    names = [s["show_name"] for s in res.json()]
+    assert names == ["apple show", "Banana Show", "Zebra Show"]
+
+
 def test_search_matches_title(client, make_file):
     _insert_media(make_file("a.mp3"), title="Bohemian Rhapsody")
     _insert_media(make_file("b.mp3"), title="Some Other Song")

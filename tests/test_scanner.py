@@ -90,6 +90,45 @@ def test_scan_removes_rows_for_files_deleted_from_disk(make_file, monkeypatch):
     assert _rows() == []
 
 
+def test_unavailable_media_dir_does_not_wipe_its_existing_rows(monkeypatch, tmp_path):
+    # Simulates an unmounted NAS / unplugged USB drive: a configured root
+    # that has real scanned rows from a previous run, but isn't a directory
+    # at all during this scan. Its rows must survive untouched rather than
+    # being wiped just because os.walk saw nothing under it this time.
+    available_dir = tmp_path / "available"
+    unavailable_dir = tmp_path / "unavailable"
+    available_dir.mkdir()
+    unavailable_dir.mkdir()
+    (available_dir / "song.mp3").write_bytes(b"data")
+    (unavailable_dir / "clip.mp4").write_bytes(b"data")
+
+    monkeypatch.setattr(settings, "get_media_dirs", lambda: [available_dir, unavailable_dir])
+    scanner.scan_media_dirs()
+    assert len(_rows()) == 2
+
+    shutil.rmtree(unavailable_dir)  # the drive backing it is now "gone"
+    scanner.scan_media_dirs()
+
+    rows = _rows()
+    assert len(rows) == 2
+    assert {Path(r["path"]).name for r in rows} == {"song.mp3", "clip.mp4"}
+
+
+def test_scan_movie_bonus_content_is_not_a_fake_movie(make_file, monkeypatch):
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None))
+    make_file("Movies/Movie (2010)/Movie.2010.mkv")
+    make_file("Movies/Movie (2010)/Special Features/bonus.mkv")
+
+    scanner.scan_media_dirs()
+
+    rows = {Path(r["path"]).name: r for r in _rows()}
+    assert rows["Movie.2010.mkv"]["is_movie"] == 1
+    assert rows["Movie.2010.mkv"]["title"] == "Movie (2010)"
+    assert rows["bonus.mkv"]["is_movie"] == 0
+    assert rows["bonus.mkv"]["is_extra"] == 1
+    assert rows["bonus.mkv"]["title"] != "Special Features"
+
+
 def test_ignores_configured_dir_that_does_not_exist(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "get_media_dirs", lambda: [tmp_path / "does-not-exist"])
     scanner.scan_media_dirs()  # should not raise
@@ -199,10 +238,13 @@ def test_scan_populates_show_fields_for_episode_style_filenames(make_file, monke
             "/media/TV", (None, None, None, False),
         ),
         # An extras-bucket folder name, but nothing on disk to confirm a
-        # real show above it (these paths don't exist on disk) -> reject.
+        # real show above it (these paths don't exist on disk, so the
+        # sibling-season-folder check can't find anything either way) --
+        # still recognized as bonus content, just with no show to
+        # attribute it to (show_name stays None).
         (
             "/media/TV/Show/Extras/Bonus.mkv",
-            "/media/TV", (None, None, None, False),
+            "/media/TV", (None, None, None, True),
         ),
         # Season folder directly under the library root -- no show folder.
         (
@@ -282,15 +324,18 @@ def test_parse_folder_show_episode_loose_extras_file_in_season_folder(tmp_path):
 def test_parse_folder_show_episode_movie_special_features_not_mistaken_for_show(tmp_path):
     # A movie's own bonus-features folder must never fabricate a phantom
     # one-episode "TV show" -- there's no real Season NN folder anywhere
-    # near "Movie (2010)", so this must fall through ungrouped exactly like
-    # today, not get flagged as an extra of a fake show called "Movie (2010)".
+    # near "Movie (2010)", so show_name stays None. It's still recognized
+    # as bonus content (is_extra=True), just with no show to attach it to
+    # -- this is what keeps it from being retitled/counted as a second
+    # "movie" named after its bucket folder (see is_movie_folder in
+    # scan_media_dirs and test_scan_movie_bonus_content_is_not_a_fake_movie).
     movie_dir = tmp_path / "Movie (2010)"
     features_dir = movie_dir / "Special Features"
     features_dir.mkdir(parents=True)
     video = features_dir / "bonus.mkv"
     video.touch()
 
-    assert scanner._parse_folder_show_episode(video, tmp_path) == (None, None, None, False)
+    assert scanner._parse_folder_show_episode(video, tmp_path) == (None, None, None, True)
 
 
 def test_parse_folder_show_episode_extras_keyword_not_trailing_is_not_flagged(tmp_path):

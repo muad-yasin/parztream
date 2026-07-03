@@ -53,6 +53,31 @@ class _FakeProcess:
         return stdout, stderr
 
 
+class _TerminableFakeProcess:
+    """Like _FakeProcess, but terminate() has a real, observable effect --
+    for tests of _terminate_stale_jobs/_reap_idle_jobs_locked, which call
+    process.terminate() and need communicate() to actually unblock and
+    poll() to eventually reflect death, the way a real killed process
+    would (rather than running "forever" with no way to end it)."""
+
+    def __init__(self):
+        self._terminate_event = threading.Event()
+        self.terminate_called = threading.Event()
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminate_called.set()
+        self._terminate_event.set()
+
+    def communicate(self):
+        self._terminate_event.wait(timeout=5)
+        self.returncode = -15
+        return b"", b""
+
+
 def test_audio_files_always_direct_play(tmp_path):
     f = tmp_path / "song.mp3"
     f.write_bytes(b"x")
@@ -112,6 +137,37 @@ def test_incompatible_audio_raises_needs_hls_remux_with_remux_audio_true(tmp_pat
     with pytest.raises(transcode.NeedsHlsRemux) as exc_info:
         transcode.resolve_playable_path(row)
     assert exc_info.value.remux_audio is True
+
+
+@pytest.mark.parametrize("codec", ["vp9", "av1", "vp8"])
+def test_ts_unsafe_codec_in_wrong_container_is_unsupported_not_a_broken_remux(tmp_path, codec):
+    # Regression test: vp8/vp9/av1 are browser-playable codecs (video_ok is
+    # True), but ffmpeg's mpegts muxer this module's HLS path relies on has
+    # no mapping for them -- routing one into "-c:v copy -f mpegts" is a
+    # guaranteed failure, not a degraded fallback, so it must be treated as
+    # unsupported instead of guaranteeing a broken playback attempt.
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"x")
+    row = _row(path=str(f), video_codec=codec, audio_codec="opus")
+
+    with pytest.raises(transcode.UnsupportedVideoCodec) as exc_info:
+        transcode.resolve_playable_path(row)
+    assert exc_info.value.reason == "container"
+    message = exc_info.value.user_message().lower()
+    assert "download" in message
+    assert "parztream_enable_transcode" not in message  # not an encoder problem
+
+
+def test_h264_in_wrong_container_still_gets_the_working_ts_remux(tmp_path):
+    # h264 is the one codec TS_SAFE_VIDEO_CODECS allows -- confirms the fix
+    # above didn't overcorrect and break the one case that actually works.
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"x")
+    row = _row(path=str(f), video_codec="h264", audio_codec="opus")
+
+    with pytest.raises(transcode.NeedsHlsRemux) as exc_info:
+        transcode.resolve_playable_path(row)
+    assert exc_info.value.reencode_video is False
 
 
 def test_build_playlist_lists_one_segment_per_chunk_and_ends_the_list():
@@ -571,3 +627,116 @@ def test_resolution_cap_applied_during_reencode(tmp_path, monkeypatch):
     width, height = first_line.split(",")
     assert int(width) == 1920
     assert int(height) == 1080
+
+
+def test_starting_a_new_job_terminates_the_old_one_for_the_same_hls_dir(tmp_path, monkeypatch):
+    # Regression test: an old job left running after a far seek used to
+    # never get stopped, letting it race a newer job on the same
+    # segment_%05d.ts filenames (two -c:v copy jobs cut segments
+    # differently, so "segment N" from each can have different content).
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"source bytes")
+    hls_dir = transcode.hls_dir_for(701)
+
+    created = []
+
+    def fake_popen(cmd, **kwargs):
+        p = _TerminableFakeProcess()
+        created.append(p)
+        return p
+
+    try:
+        with patch("subprocess.Popen", side_effect=fake_popen):
+            job1 = transcode._find_or_start_job(hls_dir, f, False, 0)
+            assert len(created) == 1
+
+            # Far beyond LOOKAHEAD_SEGMENTS -- job1 can't cover this, so a
+            # genuinely new job must start.
+            job2 = transcode._find_or_start_job(hls_dir, f, False, 500)
+            assert len(created) == 2
+            assert job2 is not job1
+
+        assert created[0].terminate_called.is_set()
+        assert job1.superseded is True
+    finally:
+        for p in created:
+            p.terminate()
+
+
+def test_idle_job_is_reaped_when_a_different_video_is_requested(tmp_path, monkeypatch):
+    # Regression test: an abandoned job (viewer navigated away) used to run
+    # to end-of-file, holding the transcode semaphore/CPU/disk the whole
+    # time. Reaping is opportunistic (piggybacks on any segment request,
+    # not a timer), so this simulates that by making a completely
+    # unrelated video's request trigger the sweep.
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"source bytes")
+
+    created = []
+
+    def fake_popen(cmd, **kwargs):
+        p = _TerminableFakeProcess()
+        created.append(p)
+        return p
+
+    try:
+        with patch("subprocess.Popen", side_effect=fake_popen):
+            job_a = transcode._find_or_start_job(transcode.hls_dir_for(801), f, False, 0)
+            job_a.last_requested = time.monotonic() - (transcode.JOB_IDLE_TIMEOUT + 1)
+
+            transcode._find_or_start_job(transcode.hls_dir_for(802), f, False, 0)
+
+        assert job_a.superseded is True
+        assert created[0].terminate_called.is_set()
+    finally:
+        for p in created:
+            p.terminate()
+
+
+def test_transcode_unavailable_raised_when_no_slot_frees_up_in_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(transcode, "_transcode_semaphore", threading.Semaphore(1))
+    monkeypatch.setattr(transcode, "TRANSCODE_SLOT_TIMEOUT", 0.2)
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "libopenh264")
+
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"source bytes")
+    held_process = _TerminableFakeProcess()
+
+    try:
+        with patch("subprocess.Popen", return_value=held_process):
+            job1 = transcode._find_or_start_job(
+                transcode.hls_dir_for(901), f, False, 0, True, None, None,
+            )
+            with pytest.raises(transcode.TranscodeUnavailable):
+                transcode._find_or_start_job(
+                    transcode.hls_dir_for(902), f, False, 0, True, None, None,
+                )
+        assert job1 is not None
+    finally:
+        held_process.terminate()
+
+
+def test_reencode_with_disappeared_encoder_device_fails_cleanly_and_releases_slot(tmp_path, monkeypatch):
+    # Regression test: get_encoder() can cache e.g. "h264_vaapi" earlier in
+    # the process's life, then the render node it needs disappears (device
+    # unplugged, permissions changed) -- encode_video_args then returns
+    # (None, None), which used to get splatted straight into the ffmpeg
+    # command list, raising an obscure TypeError instead of a clean error,
+    # and never releasing the semaphore slot it had already acquired.
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(transcode, "_transcode_semaphore", threading.Semaphore(1))
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "h264_vaapi")
+    monkeypatch.setattr(encoder_detect, "encode_video_args", lambda *a, **k: (None, None))
+
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"source bytes")
+
+    with pytest.raises(transcode.RemuxFailed):
+        transcode._find_or_start_job(transcode.hls_dir_for(1001), f, False, 0, True, None, None)
+
+    # The slot must have been released despite the failure -- a bounded
+    # acquire proves it's actually free, not just "eventually" free.
+    assert transcode._transcode_semaphore.acquire(timeout=1)

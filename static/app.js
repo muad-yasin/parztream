@@ -91,6 +91,37 @@ function showListMessage(text) {
   listEl.appendChild(li);
 }
 
+// Replaces the player with a clear error message -- used by both the
+// native media-element `error` event and hls.js's fatal-error event, so a
+// playback failure that happens *after* the pre-play codec probe (a
+// corrupt file, a network blip mid-segment, overlapping-job corruption)
+// is never just a silently frozen/black player. A "download instead" link
+// is offered the same way the pre-play 415 case already does, since the
+// underlying file may still be playable in another app even if this
+// browser choked on it mid-stream.
+function showPlaybackError(item, message) {
+  playerContainer.innerHTML = "";
+  const msg = document.createElement("p");
+  msg.className = "player-message";
+  msg.textContent = message + " ";
+  if (item.media_type !== "audio") {
+    const link = document.createElement("a");
+    link.href = `/api/stream/${item.id}?original=1`;
+    link.textContent = "Download it instead";
+    link.download = "";
+    msg.appendChild(link);
+  }
+  playerContainer.appendChild(msg);
+  announce(message);
+}
+
+const MEDIA_ERROR_MESSAGES = {
+  1: "Playback was aborted.",
+  2: "A network error interrupted playback.",
+  3: "This file's content couldn't be decoded.",
+  4: "This file's format isn't supported by this browser.",
+};
+
 function requestVideoFullscreen(el) {
   if (!isTouchDevice) return;
   try {
@@ -417,7 +448,14 @@ async function loadShowView(showName) {
 function currentRoute() {
   const hash = location.hash;
   if (hash.startsWith("#/show/")) {
-    return { view: "show", showName: decodeURIComponent(hash.slice("#/show/".length)) };
+    try {
+      return { view: "show", showName: decodeURIComponent(hash.slice("#/show/".length)) };
+    } catch (err) {
+      // Malformed percent-encoding (e.g. a truncated or hand-edited hash)
+      // -- fall back to the home view instead of throwing and leaving the
+      // whole content area blank.
+      return { view: "home" };
+    }
   }
   if (filterEl.value === "audio" || searchInputEl.value.trim() !== "") {
     return { view: "search" };
@@ -597,6 +635,14 @@ async function playMedia(item, rowBtn) {
   });
   el.addEventListener("timeupdate", () => saveResumePosition(item.id, el.currentTime));
   el.addEventListener("ended", () => clearResumePosition(item.id));
+  // Covers direct-play files, Safari's native HLS path (no hls.js
+  // involved there), and decode errors surfaced by hls.js itself onto the
+  // element -- one listener for every "something went wrong mid-playback"
+  // case that isn't already caught by the pre-play probe above.
+  el.addEventListener("error", () => {
+    const code = el.error && el.error.code;
+    showPlaybackError(item, MEDIA_ERROR_MESSAGES[code] || "Playback failed.");
+  });
 
   playerContainer.appendChild(el);
 
@@ -607,6 +653,11 @@ async function playMedia(item, rowBtn) {
       el.src = hlsPlaylistUrl;
     } else if (window.Hls && window.Hls.isSupported()) {
       const hls = new Hls();
+      hls.on(Hls.Events.ERROR, (event, data) => {
+        if (!data.fatal) return;
+        hls.destroy();
+        showPlaybackError(item, "Playback failed and couldn't recover.");
+      });
       hls.loadSource(hlsPlaylistUrl);
       hls.attachMedia(el);
     } else {
@@ -706,10 +757,9 @@ logoutBtn.addEventListener("click", async () => {
 });
 
 async function init() {
-  let status;
+  let res;
   try {
-    const res = await fetch("/api/setup/status");
-    status = await res.json();
+    res = await fetch("/api/setup/status");
   } catch (err) {
     // The home grids are visible by default -- force the flat-list view
     // on so this message is actually seen instead of landing in a hidden
@@ -718,6 +768,22 @@ async function init() {
     showListMessage("Couldn't reach the server. Try reloading the page.");
     return;
   }
+  if (res.status === 401) {
+    // An expired/invalid session -- the JSON body here is just
+    // {"detail": "Not authenticated"}, with no "configured" field at all.
+    // Without this check, `!status.configured` below is trivially true
+    // for that shape regardless of whether the library is actually
+    // configured, sending an already-set-up user to /setup.html instead
+    // of back to the login page.
+    window.location.href = `/login.html?next=${encodeURIComponent(location.pathname + location.search + location.hash)}`;
+    return;
+  }
+  if (!res.ok) {
+    setActiveView("search");
+    showListMessage("Couldn't reach the server. Try reloading the page.");
+    return;
+  }
+  const status = await res.json();
   if (!status.configured) {
     window.location.href = "/setup.html";
     return;

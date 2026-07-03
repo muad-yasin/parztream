@@ -154,3 +154,51 @@ def test_successful_login_resets_the_failed_attempt_count(client, monkeypatch):
     for _ in range(auth._MAX_ATTEMPTS - 1):
         res = client.post("/api/login", json={"pin": "0000"})
         assert res.status_code == 401
+
+
+def test_non_ascii_pin_is_rejected_not_a_500(client, monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PIN", "1234")
+
+    res = client.post("/api/login", json={"pin": "日本語"})
+
+    assert res.status_code == 401
+    assert "set-cookie" not in res.headers
+
+
+def test_check_pin_handles_non_ascii_input_without_raising():
+    assert auth.check_pin("日本語") is False
+
+
+def test_repeated_lockouts_escalate_the_wait_time(client, monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PIN", "1234")
+    client_id = "testclient"
+
+    auth.register_failed_attempt(client_id)
+    auth.register_failed_attempt(client_id)
+    auth.register_failed_attempt(client_id)
+    auth.register_failed_attempt(client_id)
+    auth.register_failed_attempt(client_id)  # 5th failure -> first lockout
+    first_wait = auth.seconds_until_unlocked(client_id)
+
+    # Force the first lockout to have already expired, then trigger a
+    # second one -- it must be longer than the first, not the same flat
+    # duration every time.
+    auth._login_attempts[client_id]["locked_until"] = 0.0
+    for _ in range(auth._MAX_ATTEMPTS):
+        auth.register_failed_attempt(client_id)
+    second_wait = auth.seconds_until_unlocked(client_id)
+
+    assert second_wait > first_wait
+
+
+def test_successful_login_resets_lockout_escalation(client, monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PIN", "1234")
+    client_id = "testclient"
+
+    for _ in range(auth._MAX_ATTEMPTS):
+        auth.register_failed_attempt(client_id)
+    assert auth._login_attempts[client_id]["lockouts"] == 1
+
+    auth.register_successful_attempt(client_id)
+
+    assert client_id not in auth._login_attempts

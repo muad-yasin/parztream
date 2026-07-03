@@ -5,6 +5,25 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def _parse_int_env(var_name: str, default):
+    """int(os.environ[var_name]) with a readable failure instead of a bare
+    traceback pointing into this module's internals -- this runs at import
+    time (before the app/its logging is even set up), so an invalid value
+    (e.g. a stray typo in a systemd env file) used to crash with nothing
+    but "ValueError: invalid literal for int() with base 10: '...'" and no
+    indication of which setting or how to fix it."""
+    raw = os.environ.get(var_name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(
+            f"{var_name}={raw!r} isn't a whole number -- fix it, or unset it to use "
+            f"the default ({default!r})."
+        )
+
 MEDIA_DIRS = [
     Path(p) for p in os.environ.get("PARZTREAM_MEDIA_DIRS", "").split(os.pathsep) if p
 ]
@@ -20,8 +39,7 @@ CACHE_DIR = Path(os.environ.get("PARZTREAM_CACHE_DIR", BASE_DIR / "cache"))
 # deleted (after a new one is created) once it's exceeded. Unset/0 means no
 # limit, matching prior behavior, since deleting things nobody asked to be
 # capped by default would be a surprising default.
-_cache_max_bytes_raw = os.environ.get("PARZTREAM_CACHE_MAX_BYTES")
-CACHE_MAX_BYTES = int(_cache_max_bytes_raw) if _cache_max_bytes_raw else None
+CACHE_MAX_BYTES = _parse_int_env("PARZTREAM_CACHE_MAX_BYTES", None)
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".m4b", ".ogg", ".wav", ".aac"}
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm"}
@@ -65,7 +83,7 @@ MDNS_HOSTNAME = os.environ.get("PARZTREAM_MDNS_HOSTNAME", "parztream")
 # kept in sync with whatever --port is passed on the command line (see
 # deploy/ templates). Wrong value just means the advertised address points
 # at a port nothing's listening on; doesn't affect the app itself.
-PORT = int(os.environ.get("PARZTREAM_PORT", "8000"))
+PORT = _parse_int_env("PARZTREAM_PORT", 8000)
 
 MDNS_ENABLED = os.environ.get("PARZTREAM_MDNS_ENABLED", "true").lower() not in ("0", "false", "no")
 
@@ -86,5 +104,13 @@ TRANSCODE_ENABLED = os.environ.get("PARZTREAM_ENABLE_TRANSCODE", "").lower() in 
 # instead prevents N different videos each spawning their own encode job
 # and overwhelming a weak CPU (the libopenh264 software fallback) or a
 # modest GPU. Small default: this is a home-LAN tool, not a transcoding farm.
-_max_concurrent_transcodes_raw = os.environ.get("PARZTREAM_MAX_CONCURRENT_TRANSCODES")
-MAX_CONCURRENT_TRANSCODES = int(_max_concurrent_transcodes_raw) if _max_concurrent_transcodes_raw else 1
+MAX_CONCURRENT_TRANSCODES = _parse_int_env("PARZTREAM_MAX_CONCURRENT_TRANSCODES", 1)
+
+# Caps how many video-thumbnail ffmpeg processes (app/artwork.py) run at
+# once, system-wide. Without this, a first-ever poster-grid load of, say,
+# 50 uncached tiles spawned 50 concurrent ffmpeg frame-grabs -- each one
+# individually cheap, but 50 at once competing for disk/CPU noticeably
+# stutters anyone already watching something. A single-frame grab is much
+# cheaper than a transcode, so this default is higher than
+# MAX_CONCURRENT_TRANSCODES's.
+MAX_CONCURRENT_THUMBNAILS = _parse_int_env("PARZTREAM_MAX_CONCURRENT_THUMBNAILS", 3)

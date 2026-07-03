@@ -142,3 +142,45 @@ def test_concurrent_requests_for_the_same_uncached_thumbnail_only_invoke_ffmpeg_
     assert call_count == 1
     assert len(results) == 8
     assert all(r == results[0] for r in results)
+
+
+def test_concurrent_thumbnails_for_different_files_are_capped(tmp_path, monkeypatch):
+    # Regression test: before the semaphore existed, N different videos'
+    # first-ever thumbnail requests (e.g. a poster grid loading) each spawned
+    # their own ffmpeg process with no cap at all -- cache.lock_for only
+    # dedups the *same* file's concurrent requests, not different files'.
+    monkeypatch.setattr(artwork, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(artwork, "_thumbnail_semaphore", threading.Semaphore(2))
+
+    in_flight = 0
+    max_in_flight = 0
+    in_flight_lock = threading.Lock()
+
+    def fake_run(cmd, **kwargs):
+        nonlocal in_flight, max_in_flight
+        with in_flight_lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        time.sleep(0.1)  # widen the race window so the bug would reproduce
+        Path(cmd[-1]).write_bytes(b"fake jpeg output")
+        with in_flight_lock:
+            in_flight -= 1
+        return MagicMock(returncode=0)
+
+    video_paths = []
+    for i in range(6):
+        p = tmp_path / f"clip{i}.mp4"
+        p.write_bytes(b"source bytes")
+        video_paths.append(p)
+
+    with patch("subprocess.run", side_effect=fake_run):
+        threads = [
+            threading.Thread(target=artwork.get_video_thumbnail, args=(i, video_paths[i], 10.0))
+            for i in range(6)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    assert max_in_flight <= 2

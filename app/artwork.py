@@ -1,11 +1,22 @@
 import subprocess
+import threading
 from pathlib import Path
 
 from mutagen import File as MutagenFile
 from mutagen.mp4 import MP4Cover
 
-from . import cache
+from . import cache, config
 from .config import CACHE_DIR
+
+# Caps concurrent thumbnail-generation ffmpeg processes system-wide --
+# cache.lock_for below only dedups *the same* not-yet-cached thumbnail, it
+# does nothing to stop many *different* files' thumbnails all spawning
+# ffmpeg at once (e.g. a first-ever poster-grid load with dozens of
+# uncached tiles). Bounded wait: this is a fast operation (a single frame
+# grab), so a request that can't get a slot in time just shows the
+# frontend's placeholder icon instead of blocking indefinitely.
+_thumbnail_semaphore = threading.Semaphore(config.MAX_CONCURRENT_THUMBNAILS)
+_THUMBNAIL_ACQUIRE_TIMEOUT = 20
 
 
 def get_cover_art(path: Path, media_type: str):
@@ -64,20 +75,28 @@ def get_video_thumbnail(media_id: int, path: Path, duration):
         # heuristic, not an attempt at a "best" thumbnail.
         seek = min(10.0, duration * 0.1) if duration else 0.0
 
-        try:
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-v", "error",
-                    "-ss", str(seek), "-i", str(path),
-                    "-frames:v", "1", "-vf", "scale=320:-1",
-                    "-q:v", "4",
-                    str(thumb_path),
-                ],
-                check=True,
-                timeout=30,
-            )
-        except (FileNotFoundError, subprocess.SubprocessError):
+        if not _thumbnail_semaphore.acquire(timeout=_THUMBNAIL_ACQUIRE_TIMEOUT):
+            # Too many thumbnails generating at once -- the /art endpoint
+            # 404s on None, and the frontend already shows a placeholder
+            # icon for that, same as any other missing thumbnail.
             return None
+        try:
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-v", "error",
+                        "-ss", str(seek), "-i", str(path),
+                        "-frames:v", "1", "-vf", "scale=320:-1",
+                        "-q:v", "4",
+                        str(thumb_path),
+                    ],
+                    check=True,
+                    timeout=30,
+                )
+            except (FileNotFoundError, subprocess.SubprocessError):
+                return None
+        finally:
+            _thumbnail_semaphore.release()
 
         if not thumb_path.is_file():
             return None

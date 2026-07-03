@@ -3,6 +3,7 @@ import subprocess
 
 import pytest
 
+from app import transcode
 from app.db import get_connection
 
 requires_ffmpeg = pytest.mark.skipif(
@@ -325,3 +326,18 @@ def test_hls_segment_generation_failure_returns_a_clean_500(client, media_dir):
 
     assert res.status_code == 500
     assert "conversion failed" in res.json()["detail"]
+
+
+def test_hls_segment_endpoint_returns_503_when_transcode_slot_unavailable(client, media_dir, monkeypatch):
+    f = media_dir / "clip.mkv"
+    f.write_bytes(b"data")
+    media_id = _insert_media(f, "video", video_codec="h264", audio_codec="aac", duration=5.0)
+
+    def fake_ensure_segment(*args, **kwargs):
+        raise transcode.TranscodeUnavailable()
+
+    monkeypatch.setattr(transcode, "ensure_segment", fake_ensure_segment)
+
+    res = client.get(f"/api/stream/{media_id}/hls/segment_00000.ts")
+
+    assert res.status_code == 503

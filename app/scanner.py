@@ -68,16 +68,32 @@ def run_claimed_scan():
 
 def scan_media_dirs():
     found_paths = set()
+    # Only roots that were actually available this scan -- a configured dir
+    # that's temporarily missing (unmounted NAS, unplugged USB) must never
+    # wipe its rows just because os.walk saw nothing under it this time.
+    # _remove_missing only deletes rows living under one of these, leaving
+    # rows under a currently-unavailable root completely untouched.
+    scanned_roots = []
     with get_connection() as conn:
         for media_dir in settings.get_media_dirs():
             if not media_dir.is_dir():
                 continue
+            scanned_roots.append(media_dir)
             # followlinks=False: don't descend into symlinked subdirectories,
             # and individual symlinked files are skipped below -- otherwise a
             # symlink placed inside a scanned folder (even one named
             # "song.mp3") could point anywhere on disk and get scanned,
             # indexed, and served as if it were a real media file.
-            for root, dirnames, filenames in os.walk(media_dir, followlinks=False):
+            # onerror: os.walk silently skips a directory it can't list by
+            # default (e.g. a permission error partway through the tree) --
+            # that's still a partial-scan risk (files under it look "missing"
+            # and get removed below, same class of issue as the whole-root
+            # case this function's scanned_roots tracking fixes), but at
+            # least logs it instead of vanishing without a trace.
+            for root, dirnames, filenames in os.walk(
+                media_dir, followlinks=False,
+                onerror=lambda exc: logger.warning("Scan: couldn't list a directory: %s", exc),
+            ):
                 root_path = Path(root)
                 # This directory is a TV show folder if any of its immediate
                 # children looks like a season folder -- used below to keep
@@ -113,8 +129,14 @@ def scan_media_dirs():
                 # isn't (e.g. "Inception (2010)/Inception.2010.GROUP.mkv").
                 # Ambiguous cases (2+ real videos, no season structure) are
                 # deliberately left alone rather than guessing which file
-                # "is" the movie.
-                is_movie_folder = not has_season_subfolder and len(video_paths) == 1
+                # "is" the movie. Excludes an extras-bucket folder itself
+                # (e.g. "Movie (2010)/Special Features/bonus.mkv") -- that
+                # single video is bonus content, not a second movie titled
+                # after its bucket folder's name.
+                is_movie_folder = (
+                    not has_season_subfolder and len(video_paths) == 1
+                    and not _EXTRAS_FOLDER_RE.fullmatch(root_path.name.strip())
+                )
 
                 for path in video_paths:
                     found_paths.add(str(path))
@@ -135,7 +157,7 @@ def scan_media_dirs():
                         continue
                     _scan_state["scanned_count"] += 1
 
-        _remove_missing(conn, found_paths)
+        _remove_missing(conn, found_paths, scanned_roots)
 
 
 def _record_scan_failure(path: Path, exc: Exception):
@@ -257,12 +279,15 @@ def _extract_metadata(
         show_name, season_number, episode_number, is_extra = (None, None, None, False)
         if media_root is not None:
             show_name, season_number, episode_number, is_extra = _parse_folder_show_episode(path, media_root)
-        if show_name is None:
+        if show_name is None and not is_extra:
             # The filename-only fallback never recognizes extras -- it only
             # matches the "Show Name S01E02" convention, which a bonus-
-            # content file never happens to look like.
+            # content file never happens to look like. Only reached when
+            # the folder heuristic found nothing recognizable at all --
+            # not even "this is bonus content with no show to attach it
+            # to" (show_name is None but is_extra is already True) is
+            # overwritten here.
             show_name, season_number, episode_number = _parse_show_episode(path.stem)
-            is_extra = False
         info["show_name"], info["season_number"], info["episode_number"], info["is_extra"] = (
             show_name, season_number, episode_number, is_extra,
         )
@@ -421,19 +446,26 @@ def _parse_folder_show_episode(path: Path, media_root: Path):
     if _EXTRAS_FOLDER_RE.fullmatch(season_dir.name.strip()):
         show_dir = _find_show_dir_above_extras(season_dir, media_root)
         if show_dir is None:
-            return None, None, None, False
+            # A recognized extras-bucket folder, but nothing plausible
+            # above it to attribute it to -- still bonus content (the
+            # folder name says so), just with no show to attach it to.
+            return None, None, None, True
         # Guard against a movie's own bonus-features folder being mistaken
         # for a TV show -- only trust this walk-up when the resolved folder
         # actually has a real season subfolder somewhere. A real
         # season-organized show will have that; a movie's own folder (e.g.
         # "Movie (2010)/Special Features/") never will. Without this check,
         # "Movie (2010)/Special Features/bonus.mkv" would fabricate a
-        # phantom one-episode "TV show" called "Movie (2010)".
+        # phantom one-episode "TV show" called "Movie (2010)". It's still
+        # correctly recognized as bonus content (is_extra=True) either way
+        # -- see is_movie_folder in scan_media_dirs for the corresponding
+        # suppression that keeps it from being retitled/counted as its own
+        # movie.
         if not _has_season_subfolder(show_dir):
-            return None, None, None, False
+            return None, None, None, True
         show_name = show_dir.name.strip()
         if not show_name:
-            return None, None, None, False
+            return None, None, None, True
         return show_name, None, None, True
 
     match = _SEASON_FOLDER_RE.fullmatch(season_dir.name.strip())
@@ -570,8 +602,16 @@ def _probe_duration_via_packets(path: Path):
     return last_pts
 
 
-def _remove_missing(conn, found_paths: set):
+def _remove_missing(conn, found_paths: set, scanned_roots: list):
+    """Delete rows for files no longer found on disk -- but only rows that
+    live under a root this scan actually walked. A configured dir that was
+    unavailable this run (unmounted NAS, unplugged USB drive) contributes no
+    scanned_roots entry at all, so its rows are left completely alone rather
+    than being wiped just because nothing was seen under it this time."""
     existing = conn.execute("SELECT id, path FROM media").fetchall()
     for row in existing:
-        if row["path"] not in found_paths:
+        if row["path"] in found_paths:
+            continue
+        path = Path(row["path"])
+        if any(path.is_relative_to(root) for root in scanned_roots):
             conn.execute("DELETE FROM media WHERE id = ?", (row["id"],))
