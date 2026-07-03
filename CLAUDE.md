@@ -147,7 +147,7 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   app; this is a deliberate choice, not an oversight, consistent with
   the "you're the admin" model everywhere else here. Worth remembering:
   `/setup.html`/`/api/setup/*` are reachable with **no auth at all**
-  during the specific window where `PARZTREAM_PASSWORD` isn't set yet
+  during the specific window where `PARZTREAM_PIN` isn't set yet
   and folders haven't been configured — that's the existing
   no-auth-by-default behavior extended to setup, not a new gap.
 - `app/artwork.py` — two independent functions, kept separate rather
@@ -261,7 +261,7 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   there's nothing sensitive in static branding images to justify
   gating them. Confirmed live: without this, those links 401'd on the
   one page that's supposed to work pre-auth — regression test in
-  `tests/test_auth.py`). No-ops entirely if `PARZTREAM_PASSWORD`
+  `tests/test_auth.py`). No-ops entirely if `PARZTREAM_PIN`
   isn't set, same as before. Distinguishes a real browser navigation
   from a `fetch()`/`<img>`/`<video>` request via the `Accept` header
   (`text/html` → `302` redirect to `/login.html?next=<original path>`;
@@ -278,9 +278,9 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   stop sending the cookie (`Response.delete_cookie`) — there's no
   revocation list, so a copied cookie value stays valid until it
   expires on its own regardless of logout, and changing
-  `PARZTREAM_PASSWORD` does **not** invalidate already-issued sessions
+  `PARZTREAM_PIN` does **not** invalidate already-issued sessions
   (only rotating `SECRET_KEY` does, since that's what sessions are
-  signed against, not the password). This is a known, accepted
+  signed against, not the PIN). This is a known, accepted
   trade-off for a stateless design, not an oversight — document it if
   you touch this, don't silently "fix" it into a stateful store without
   discussing the trade-off first.
@@ -288,14 +288,35 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   design (see README), and a `Secure` cookie is never sent back at all
   over a non-HTTPS connection — setting it would silently break every
   login.
-- `app/routers/login.py` — `POST /api/login` (checks
-  `auth.check_credentials`, sets the session cookie), `POST /api/logout`
-  (clears it). References `auth.AUTH_PASSWORD`/`auth.AUTH_USERNAME` via
-  the `auth` module object (`from .. import auth`, then `auth.AUTH_PASSWORD`
-  at call time) rather than `from ..auth import AUTH_PASSWORD` — the
-  latter would bind its own independent copy at import time that tests
-  monkeypatching `auth.AUTH_PASSWORD` wouldn't reach. Same "quirk" as
-  `config.py`'s other consumers, documented further down.
+  Login is gated by a 4-digit **PIN** (`config.AUTH_PIN`,
+  `PARZTREAM_PIN`), not an arbitrary-length password — chosen
+  deliberately for faster entry on a phone/TV remote, since the
+  realistic threat model here is someone already on the home LAN, not
+  a remote attacker. Because a PIN's keyspace (10,000 combinations) is
+  small enough to brute-force quickly without a password's entropy,
+  `auth.py` also tracks failed attempts per client IP
+  (`_login_attempts`, in-process/module-level like `app/scanner.py`'s
+  scan lock — same single-process caveat applies) and locks out further
+  attempts for `_LOCKOUT_SECONDS` (30s) after `_MAX_ATTEMPTS` (5)
+  consecutive failures from the same address; a successful login clears
+  that address's count. This is throttling, not real brute-force
+  protection (it resets on restart, and doesn't survive a distributed
+  attempt from multiple addresses) — proportionate to a home-LAN threat
+  model, not meant to be bulletproof.
+- `app/routers/login.py` — `POST /api/login` (checks the lockout via
+  `auth.seconds_until_unlocked` before even looking at the submitted
+  PIN, then `auth.check_pin`, then sets the session cookie),
+  `POST /api/logout` (clears it). References `auth.AUTH_PIN` via the
+  `auth` module object (`from .. import auth`, then `auth.AUTH_PIN` at
+  call time) rather than `from ..auth import AUTH_PIN` — the latter
+  would bind its own independent copy at import time that tests
+  monkeypatching `auth.AUTH_PIN` wouldn't reach. Same "quirk" as
+  `config.py`'s other consumers, documented further down. The lockout
+  key is `request.client.host`, not the session (there isn't one yet
+  at login time) — falls back to a shared `"unknown"` bucket if
+  `request.client` is `None` (some ASGI transports don't set it),
+  which just means everyone on such a setup shares one lockout counter
+  rather than the endpoint crashing.
 - `app/network.py` — `get_local_ip()`, the classic "connect a UDP
   socket to an external address and read what local address the OS
   picked" trick for guessing this machine's LAN-facing IP. UDP
@@ -333,7 +354,7 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   logger and sets `propagate = False` — without an actual handler,
   Python's logging module only surfaces `WARNING`+ via its built-in
   fallback ("handler of last resort"), regardless of what level is set
-  on the logger itself. Confirmed live: the `PARZTREAM_PASSWORD` unset
+  on the logger itself. Confirmed live: the `PARZTREAM_PIN` unset
   warning showed up in the console fine, but `app/mdns.py`'s
   successful-registration `info()` log line silently didn't, which
   looked exactly like mDNS had failed even though it hadn't. If you
@@ -382,12 +403,15 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   an exact filesystem path.
   `login.html` is standalone, not a view inside `index.html` — inline
   `<style>`/`<script>`, no dependency on `style.css`/`app.js`, so it
-  never needs to be in `auth.PUBLIC_PATHS` beyond itself. Password-only
-  form (no username field) — `AUTH_USERNAME` is applied server-side
-  without the user ever entering it, since it's almost never changed
-  from the default and asking for it adds a confusing "wait, what's my
-  username?" moment for the non-technical audience this is aimed at.
-  Reads `?next=` from its own URL to return you to whatever page
+  never needs to be in `auth.PUBLIC_PATHS` beyond itself. PIN-only
+  form: a single `type="password"` input constrained to 4 digits
+  (`inputmode="numeric"`, digit-stripping on `input` so a physical
+  keyboard can't type non-digits into it) that auto-submits
+  (`form.requestSubmit()`) once 4 digits are entered — no separate
+  submit tap needed, matching the phone-lock-screen convention this is
+  deliberately modeled on. A `429` from `/api/login` (rate-limited, see
+  `app/auth.py`) is shown with the server's own message, which includes
+  seconds-remaining. Reads `?next=` from its own URL to return you to whatever page
   triggered the redirect, but only if it's a relative path
   (`next.startsWith("/")`) — guards against an open-redirect via a
   crafted link with `?next=https://evil.example`. The header's
@@ -645,10 +669,10 @@ patching to the same tmp path for a test to see one consistent cache
 dir — `isolated_app_state` does all three.
 
 This same quirk is why `app/routers/login.py` deliberately imports
-`from .. import auth` and writes `auth.AUTH_PASSWORD` instead of
-`from ..auth import AUTH_PASSWORD` — the latter binds its own
+`from .. import auth` and writes `auth.AUTH_PIN` instead of
+`from ..auth import AUTH_PIN` — the latter binds its own
 independent copy at import time, which `monkeypatch.setattr(auth,
-"AUTH_PASSWORD", ...)` in tests would never reach. When a module needs
+"AUTH_PIN", ...)` in tests would never reach. When a module needs
 a value another module already imported from `config` (rather than
 importing straight from `config` itself), prefer referencing the
 other module's attribute at call time over re-importing from `config`

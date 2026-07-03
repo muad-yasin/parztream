@@ -1,4 +1,5 @@
 import secrets
+import time
 from http.cookies import SimpleCookie
 from urllib.parse import quote
 
@@ -6,7 +7,7 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse, RedirectResponse
 
-from .config import AUTH_PASSWORD, AUTH_USERNAME, SECRET_KEY, SESSION_MAX_AGE
+from .config import AUTH_PIN, SECRET_KEY, SESSION_MAX_AGE
 
 SESSION_COOKIE_NAME = "parztream_session"
 _SESSION_VALUE = "authenticated"
@@ -30,11 +31,39 @@ PUBLIC_PATHS = {
 
 _serializer = URLSafeTimedSerializer(SECRET_KEY, salt="parztream-session")
 
+# A 4-digit PIN only has 10,000 possibilities, so unlike a real password it
+# needs throttling to not be trivially brute-forceable over a fast LAN
+# connection. In-process only, like app/scanner.py's scan lock -- resets on
+# restart and only meaningful because the app always runs as a single
+# process (see CLAUDE.md). Keyed by client IP, not the (nonexistent) session,
+# since a lockout has to apply *before* anyone's proven who they are.
+_MAX_ATTEMPTS = 5
+_LOCKOUT_SECONDS = 30
+_login_attempts: dict[str, dict] = {}
 
-def check_credentials(username: str, password: str) -> bool:
-    return secrets.compare_digest(username, AUTH_USERNAME) and secrets.compare_digest(
-        password, AUTH_PASSWORD or ""
-    )
+
+def check_pin(pin: str) -> bool:
+    return secrets.compare_digest(pin, AUTH_PIN or "")
+
+
+def register_failed_attempt(client_id: str) -> None:
+    record = _login_attempts.setdefault(client_id, {"count": 0, "locked_until": 0.0})
+    record["count"] += 1
+    if record["count"] >= _MAX_ATTEMPTS:
+        record["locked_until"] = time.monotonic() + _LOCKOUT_SECONDS
+        record["count"] = 0
+
+
+def register_successful_attempt(client_id: str) -> None:
+    _login_attempts.pop(client_id, None)
+
+
+def seconds_until_unlocked(client_id: str) -> int:
+    record = _login_attempts.get(client_id)
+    if not record:
+        return 0
+    remaining = record["locked_until"] - time.monotonic()
+    return max(0, int(remaining) + 1 if remaining > 0 else 0)
 
 
 def create_session_cookie_value() -> str:
@@ -59,7 +88,7 @@ class SessionAuthMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or not AUTH_PASSWORD:
+        if scope["type"] != "http" or not AUTH_PIN:
             await self.app(scope, receive, send)
             return
 

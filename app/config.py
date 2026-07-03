@@ -32,8 +32,13 @@ VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm"}
 # wouldn't know how to play it.
 mimetypes.add_type("audio/mp4", ".m4b")
 
-AUTH_USERNAME = os.environ.get("PARZTREAM_USERNAME", "parztream")
-AUTH_PASSWORD = os.environ.get("PARZTREAM_PASSWORD")
+# A 4-digit PIN rather than an arbitrary password -- faster to type on a
+# phone/TV remote for a home-LAN tool where the realistic threat model is
+# "someone on my network I don't trust", not a sophisticated remote
+# attacker. Not validated to actually be 4 digits here (see auth.py's
+# startup warning) so an existing longer value keeps working rather than
+# hard-breaking on upgrade.
+AUTH_PIN = os.environ.get("PARZTREAM_PIN")
 
 # Signs session cookies (see app/auth.py). If unset, a random key is
 # generated at every process start -- simplest zero-config default, at the

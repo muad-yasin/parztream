@@ -186,11 +186,17 @@ as described, this is the first place to look.
 
 ## How login sessions work
 
-Setting `PARZTREAM_PASSWORD` (see [Configuration reference](#configuration-reference))
-makes the app require signing in through a login page before anything
-is accessible. Without it, anyone who can reach the server's address
-can browse and stream — fine on a fully trusted home network, not
-recommended otherwise.
+Setting `PARZTREAM_PIN` (see [Configuration reference](#configuration-reference))
+makes the app require signing in with a 4-digit PIN through a login
+page before anything is accessible. Without it, anyone who can reach
+the server's address can browse and stream — fine on a fully trusted
+home network, not recommended otherwise. A PIN is deliberately not a
+full password: it's faster to type on a phone or TV remote, which
+matters more here than resisting a determined remote attacker, since
+the realistic risk on a home LAN is someone already on your network,
+not an internet-wide brute-force campaign. To keep even that
+narrower risk in check, 5 incorrect attempts from the same address
+lock out further attempts for 30 seconds.
 
 A successful login sets a signed session cookie good for 90 days, so
 you're not asked again on every visit; "Log out" in the header clears
@@ -199,8 +205,7 @@ server-side, so logging out only tells your *browser* to stop sending
 the cookie — a copied cookie value stays valid until it expires on
 its own. If you ever suspect a session leaked, set/rotate
 `PARZTREAM_SECRET_KEY` and restart — that invalidates every existing
-session at once, which changing `PARZTREAM_PASSWORD` alone does not
-do.
+session at once, which changing `PARZTREAM_PIN` alone does not do.
 
 ## Configuration reference
 
@@ -212,8 +217,7 @@ want to configure it another way (e.g. for the service setups below).
 |---|---|---|
 | `PARZTREAM_MEDIA_DIRS` | Folders to scan, separated by `os.pathsep` (`:` on Linux/macOS, `;` on Windows). Only used as a starting default — once folders are saved through the setup page, that takes over. | none (setup page prompts) |
 | `PARZTREAM_DB_PATH` | SQLite database file location. | `parztream.db` |
-| `PARZTREAM_PASSWORD` | Enables login. See [How login sessions work](#how-login-sessions-work). | unset (no login) |
-| `PARZTREAM_USERNAME` | Login username. Only relevant if you're calling the login API directly — the login page itself only asks for a password. | `parztream` |
+| `PARZTREAM_PIN` | Enables login. Should be a 4-digit PIN. See [How login sessions work](#how-login-sessions-work). | unset (no login) |
 | `PARZTREAM_SECRET_KEY` | Signs session cookies. If unset, a random key is generated on every restart, meaning everyone's logged out each time. Set a fixed value (`python3 -c "import secrets; print(secrets.token_hex(32))"`) to keep people logged in across restarts. | random per-restart |
 | `PARZTREAM_CACHE_DIR` | Where repackaged videos and video thumbnails are cached. | `cache/` |
 | `PARZTREAM_CACHE_MAX_BYTES` | Caps the cache folder's total size — oldest files are deleted once a new one pushes it over the limit. An evicted file just gets cheaply re-derived next time it's played. | unset (no limit) |
@@ -246,7 +250,7 @@ persistent background service (auto-start, restart on crash) are in
    sudo chown -R parztream:parztream /opt/parztream
    ```
 2. Copy the env template and fill in real values — keep it outside
-   the project checkout since it holds a password:
+   the project checkout since it holds a PIN:
    ```bash
    sudo mkdir -p /etc/parztream
    sudo cp deploy/systemd/parztream.env.example /etc/parztream/parztream.env
@@ -337,8 +341,8 @@ immediately (which would show a connection-refused page).
 The .exe reads the same `PARZTREAM_*` environment variables as
 running from source (see [Configuration reference](#configuration-reference))
 — there's no in-app settings screen for them yet. Set them in Windows
-before double-clicking (e.g. `setx PARZTREAM_PASSWORD your-password`
-in a terminal, then reopen the exe) if you want a password or other
+before double-clicking (e.g. `setx PARZTREAM_PIN 1234`
+in a terminal, then reopen the exe) if you want a PIN or other
 non-default config.
 
 To build it yourself on a real Windows machine instead of relying on
@@ -397,7 +401,7 @@ nothing on a headless server (a genuinely common way this specific app
 gets run), which the launcher accounts for rather than treating as an
 error. Same `setdefault`-not-override behavior for all of these: set
 your own environment variables first (e.g. `export
-PARZTREAM_PASSWORD=...` before running it) for a password or other
+PARZTREAM_PIN=1234` before running it) for a PIN or other
 non-default config.
 
 What's specific to Linux/AppImage rather than shared with Windows:
@@ -498,7 +502,7 @@ for this, instead of `%APPDATA%` or the XDG dirs), persists a
 generated `PARZTREAM_SECRET_KEY` there too, adds the bundled
 `ffmpeg`/`ffprobe` to `PATH`, and opens the default browser once the
 server's ready. Same `setdefault`-not-override behavior: set your own
-environment variables first for a password or other non-default
+environment variables first for a PIN or other non-default
 config.
 
 **Difference 1 — no console by default.** Double-clicking a `.app` on

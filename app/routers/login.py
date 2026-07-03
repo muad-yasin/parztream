@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from .. import auth
@@ -7,22 +7,35 @@ router = APIRouter(prefix="/api", tags=["auth"])
 
 
 class LoginPayload(BaseModel):
-    password: str
+    pin: str
 
 
 @router.post("/login")
-def login(payload: LoginPayload, response: Response):
-    # Referenced via the auth module (not `from ..auth import AUTH_PASSWORD`)
-    # so tests monkeypatching auth.AUTH_PASSWORD/AUTH_USERNAME are actually
-    # seen here -- a separate `from` import would bind its own independent
-    # copy at import time. Same reasoning as documented in CLAUDE.md for
-    # config.py's other consumers.
-    if not auth.AUTH_PASSWORD:
+def login(payload: LoginPayload, request: Request, response: Response):
+    # Referenced via the auth module (not `from ..auth import AUTH_PIN`) so
+    # tests monkeypatching auth.AUTH_PIN are actually seen here -- a separate
+    # `from` import would bind its own independent copy at import time. Same
+    # reasoning as documented in CLAUDE.md for config.py's other consumers.
+    if not auth.AUTH_PIN:
         raise HTTPException(status_code=400, detail="Authentication is not enabled")
 
-    if not auth.check_credentials(auth.AUTH_USERNAME, payload.password):
-        raise HTTPException(status_code=401, detail="Incorrect password")
+    # request.client can be None for some ASGI transports (e.g. certain unix
+    # socket setups) -- fall back to a shared bucket rather than crashing;
+    # worst case everyone shares one lockout counter in that rare setup.
+    client_id = request.client.host if request.client else "unknown"
 
+    remaining = auth.seconds_until_unlocked(client_id)
+    if remaining > 0:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many incorrect attempts. Try again in {remaining}s.",
+        )
+
+    if not auth.check_pin(payload.pin):
+        auth.register_failed_attempt(client_id)
+        raise HTTPException(status_code=401, detail="Incorrect PIN")
+
+    auth.register_successful_attempt(client_id)
     response.set_cookie(
         key=auth.SESSION_COOKIE_NAME,
         value=auth.create_session_cookie_value(),

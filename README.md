@@ -65,7 +65,7 @@ running from source instead.
 ---
 
 Want to run parztream from source (e.g. an Intel Mac, or to
-contribute to the code), set a password, or have it start
+contribute to the code), set a PIN, or have it start
 automatically as a background service? See [`ADVANCED.md`](ADVANCED.md).
 
 ## How to use it
@@ -88,7 +88,7 @@ automatically as a background service? See [`ADVANCED.md`](ADVANCED.md).
   to Home Screen") for a shortcut that looks and feels like a real
   app.
 
-Want a password so only people you trust can see your library? See
+Want a PIN so only people you trust can see your library? See
 [`ADVANCED.md`](ADVANCED.md).
 
 ## Running it again later
@@ -168,7 +168,7 @@ confusing anywhere, that's useful to know too.
 
 ---
 
-Looking for more advanced options — running from source, password
+Looking for more advanced options — running from source, PIN
 protection, running parztream automatically in the background,
 changing where files are stored, or other configuration? See
 [`ADVANCED.md`](ADVANCED.md).

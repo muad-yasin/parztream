@@ -31,8 +31,11 @@ def isolated_app_state(tmp_path, media_dir, monkeypatch):
     # itself, keeps the real settings.py logic exercised by the whole suite.
     monkeypatch.setattr(config, "MEDIA_DIRS", [media_dir])
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
-    monkeypatch.setattr(auth, "AUTH_PASSWORD", None)
-    monkeypatch.setattr(auth, "AUTH_USERNAME", "parztream")
+    monkeypatch.setattr(auth, "AUTH_PIN", None)
+    # Rate-limit state is in-process/module-level (see app/auth.py), so
+    # without clearing it a lockout triggered by one test's failed-login
+    # attempts would leak into the next test using the same TestClient IP.
+    auth._login_attempts.clear()
     monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(artwork, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(cache, "CACHE_DIR", tmp_path / "cache")

@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import mdns
 from .auth import SessionAuthMiddleware
-from .config import AUTH_PASSWORD
+from .config import AUTH_PIN
 from .db import init_db
 from .routers import library, login, setup, stream
 
@@ -28,9 +28,14 @@ logger.propagate = False
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    if not AUTH_PASSWORD:
+    if not AUTH_PIN:
         logger.warning(
-            "PARZTREAM_PASSWORD is not set — the server is reachable with no authentication."
+            "PARZTREAM_PIN is not set — the server is reachable with no authentication."
+        )
+    elif not (len(AUTH_PIN) == 4 and AUTH_PIN.isdigit()):
+        logger.warning(
+            "PARZTREAM_PIN is set but isn't a 4-digit PIN — login will still work, "
+            "but the login page expects exactly 4 digits."
         )
     mdns.start_mdns()
     yield

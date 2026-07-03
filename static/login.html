@@ -43,6 +43,11 @@
       color: inherit;
       margin-bottom: 1rem;
     }
+    #pin {
+      font-size: 1.5rem;
+      letter-spacing: 0.5em;
+      text-align: center;
+    }
     button {
       width: 100%;
       font: inherit;
@@ -84,17 +89,38 @@
 <body>
   <form class="login-card" id="login-form">
     <h1>parztream</h1>
-    <label for="password" class="sr-only">Password</label>
-    <input type="password" id="password" placeholder="Password" autofocus required>
+    <label for="pin" class="sr-only">4-digit PIN</label>
+    <input
+      type="password"
+      id="pin"
+      inputmode="numeric"
+      pattern="[0-9]{4}"
+      maxlength="4"
+      autocomplete="off"
+      placeholder="····"
+      autofocus
+      required
+    >
     <button type="submit">Log in</button>
     <p class="error" id="error" role="alert"></p>
   </form>
 
   <script>
     const form = document.getElementById("login-form");
-    const passwordInput = document.getElementById("password");
+    const pinInput = document.getElementById("pin");
     const errorEl = document.getElementById("error");
     const submitBtn = form.querySelector("button");
+
+    // Strip anything non-numeric as it's typed (the numeric keypad on
+    // mobile mostly prevents this anyway, but a physical keyboard doesn't),
+    // and auto-submit once all 4 digits are in -- matches the PIN-entry
+    // convention people already know from phone lock screens.
+    pinInput.addEventListener("input", () => {
+      pinInput.value = pinInput.value.replace(/\D/g, "").slice(0, 4);
+      if (pinInput.value.length === 4) {
+        form.requestSubmit();
+      }
+    });
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -106,7 +132,7 @@
         res = await fetch("/api/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ password: passwordInput.value }),
+          body: JSON.stringify({ pin: pinInput.value }),
         });
       } catch (err) {
         errorEl.textContent = "Couldn't reach the server.";
@@ -122,9 +148,17 @@
       }
 
       submitBtn.disabled = false;
-      errorEl.textContent = res.status === 401 ? "Incorrect password." : "Something went wrong.";
-      passwordInput.value = "";
-      passwordInput.focus();
+      pinInput.value = "";
+      pinInput.focus();
+
+      if (res.status === 401) {
+        errorEl.textContent = "Incorrect PIN.";
+      } else if (res.status === 429) {
+        const body = await res.json().catch(() => ({}));
+        errorEl.textContent = body.detail || "Too many incorrect attempts. Try again shortly.";
+      } else {
+        errorEl.textContent = "Something went wrong.";
+      }
     });
   </script>
 </body>
