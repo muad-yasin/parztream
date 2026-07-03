@@ -1,26 +1,35 @@
+import logging
 import mimetypes
 import re
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
+from .. import transcode
 from ..db import get_connection
-from ..transcode import UnsupportedVideoCodec, resolve_playable_path
 
 router = APIRouter(prefix="/api", tags=["stream"])
 
+logger = logging.getLogger("parztream")
+
 CHUNK_SIZE = 1024 * 1024
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
+SEGMENT_NAME_RE = re.compile(r"^segment_(\d{5})\.ts$")
 
 
-@router.get("/stream/{media_id}")
-def stream_media(media_id: int, request: Request, original: bool = False):
+def _get_media_row(media_id: int):
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Media not found")
+    return row
+
+
+@router.get("/stream/{media_id}")
+def stream_media(media_id: int, request: Request, original: bool = False):
+    row = _get_media_row(media_id)
 
     original_path = Path(row["path"])
     if not original_path.is_file():
@@ -36,12 +45,18 @@ def stream_media(media_id: int, request: Request, original: bool = False):
         path = original_path
     else:
         try:
-            path = resolve_playable_path(row)
-        except UnsupportedVideoCodec as exc:
+            path = transcode.resolve_playable_path(row)
+        except transcode.UnsupportedVideoCodec as exc:
             raise HTTPException(
                 status_code=415,
                 detail=f"Video codec '{exc}' can't be played in a browser yet",
             )
+        except transcode.NeedsHlsRemux:
+            # Tells the frontend to switch to HLS playback instead of
+            # treating this endpoint as a directly-streamable file -- the
+            # actual conversion work happens lazily as the playlist/segment
+            # endpoints below are requested, not here.
+            return JSONResponse({"hls_playlist": f"/api/stream/{media_id}/hls/playlist.m3u8"})
 
     file_size = path.stat().st_size
     content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -94,6 +109,67 @@ def stream_media(media_id: int, request: Request, original: bool = False):
         media_type=content_type,
         headers=headers,
     )
+
+
+def _require_hls(row) -> bool:
+    """Returns the `remux_audio` flag if this row genuinely needs HLS
+    remuxing; raises a clean HTTPException otherwise. Hitting these routes
+    for a file that doesn't need remuxing at all would be a frontend bug,
+    not a normal case -- fail with a real error rather than silently doing
+    the wrong thing."""
+    try:
+        transcode.resolve_playable_path(row)
+    except transcode.UnsupportedVideoCodec as exc:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Video codec '{exc}' can't be played in a browser yet",
+        )
+    except transcode.NeedsHlsRemux as exc:
+        return exc.remux_audio
+    raise HTTPException(status_code=400, detail="This file doesn't need HLS remuxing")
+
+
+@router.get("/stream/{media_id}/hls/playlist.m3u8")
+def stream_hls_playlist(media_id: int):
+    row = _get_media_row(media_id)
+    _require_hls(row)
+
+    if row["duration"] is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Video duration unknown; try rescanning the library.",
+        )
+
+    playlist = transcode.build_playlist(row["duration"])
+    return Response(content=playlist, media_type="application/vnd.apple.mpegurl")
+
+
+@router.get("/stream/{media_id}/hls/{segment_name}")
+def stream_hls_segment(media_id: int, segment_name: str):
+    row = _get_media_row(media_id)
+    remux_audio = _require_hls(row)
+
+    match = SEGMENT_NAME_RE.fullmatch(segment_name)
+    if not match:
+        raise HTTPException(status_code=404, detail="Not found")
+    index = int(match.group(1))
+
+    original_path = Path(row["path"])
+    if not original_path.is_file():
+        raise HTTPException(status_code=404, detail="File missing on disk")
+
+    try:
+        segment_path = transcode.ensure_segment(media_id, original_path, remux_audio, index)
+    except transcode.RemuxFailed as exc:
+        logger.error("Remux failed for media %s: %s", media_id, exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Couldn't prepare this video for playback (conversion failed).",
+        )
+    except (FileNotFoundError, TimeoutError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    return FileResponse(segment_path, media_type="video/mp2t")
 
 
 def _iter_file(path: Path, start: int, end: int):

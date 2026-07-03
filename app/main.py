@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from . import mdns
+from . import mdns, transcode
 from .auth import SessionAuthMiddleware
 from .config import AUTH_PIN
 from .db import init_db
@@ -40,6 +40,11 @@ async def lifespan(app: FastAPI):
     mdns.start_mdns()
     yield
     mdns.stop_mdns()
+    # Without this, an ffmpeg process generating HLS segments (see
+    # app/transcode.py) at the moment the server stops/restarts would be
+    # left running in the background indefinitely instead of being cleaned
+    # up with the server that spawned it.
+    transcode.terminate_all_jobs()
 
 
 app = FastAPI(title="parztream", lifespan=lifespan)

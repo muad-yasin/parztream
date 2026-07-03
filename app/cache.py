@@ -28,30 +28,54 @@ def lock_for(key: str) -> threading.Lock:
         return _locks[key]
 
 
-def prune(protect: Path):
+def prune(protect: Path = None):
     """Delete the oldest cached files until CACHE_DIR is back under
     CACHE_MAX_BYTES, if a limit is configured. Never deletes `protect` (the
     file that was just created and is about to be served for this request),
     even if it alone exceeds the limit -- an oversized cache in that edge
     case is preferable to breaking the request that just created it.
+    `protect` is optional since app/transcode.py's HLS segment jobs don't
+    have one single file to protect -- their own recency (a segment written
+    moments ago has a fresh mtime) already makes eviction naturally favor
+    older, unwatched sessions first.
+
+    Recurses one level into HLS segment directories (app/transcode.py,
+    `{media_id}_hls/`) so individual segment files age out like any other
+    cached file, rather than treating a whole directory as one unbreakable
+    unit -- a missing segment is cheap to regenerate on the next request,
+    same as any other cache miss here.
 
     Tolerant of files disappearing mid-computation: two different resources
     (e.g. one media item's remux and another's thumbnail) can legitimately
     finish and prune around the same time, each unaware of the other, and
-    race on evicting the same old file."""
+    race on evicting the same old file. Also tolerant of a segment file
+    disappearing/appearing while an HLS job is actively writing into its
+    directory -- a rare race, acceptable here since eviction is opt-in
+    (CACHE_MAX_BYTES unset by default) and a wrongly-evicted in-progress
+    segment just gets regenerated on its next request like any cache miss."""
     if CACHE_MAX_BYTES is None:
         return
 
     sized = []
     for p in CACHE_DIR.glob("*"):
         try:
-            if p.is_file():
+            if p.is_dir():
+                for seg in p.glob("*"):
+                    try:
+                        if seg.is_file():
+                            sized.append((seg, seg.stat().st_size, seg.stat().st_mtime))
+                    except FileNotFoundError:
+                        continue
+            elif p.is_file():
                 sized.append((p, p.stat().st_size, p.stat().st_mtime))
         except FileNotFoundError:
             continue  # deleted by a concurrent prune() -- just skip it
 
     total = sum(size for _, size, _ in sized)
-    evictable = sorted((entry for entry in sized if entry[0] != protect), key=lambda entry: entry[2])
+    evictable = sorted(
+        (entry for entry in sized if protect is None or entry[0] != protect),
+        key=lambda entry: entry[2],
+    )
 
     for f, size, _mtime in evictable:
         if total <= CACHE_MAX_BYTES:

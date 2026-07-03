@@ -272,18 +272,25 @@ async function playMedia(item, rowBtn) {
   playerContainer.scrollIntoView({ behavior: "smooth", block: "start" });
   announce(`Preparing ${item.title || "playback"}…`);
 
-  // A tiny ranged probe first: if the file needs a container/audio fix
-  // (see app/transcode.py), this is also what triggers and waits for that
-  // one-time conversion, so by the time we hand the URL to <video>/<audio>
-  // it's already cached and plays instantly. It also lets us show a clear
-  // message instead of a silent player failure for codecs we can't fix.
+  // A tiny ranged probe first: this just asks the server whether the file
+  // plays directly or needs HLS (see app/transcode.py) -- it no longer
+  // waits for any conversion itself, that now happens lazily as the
+  // playlist/segments are actually requested below. It also lets us show a
+  // clear message instead of a silent player failure for codecs we can't
+  // fix at all.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 20000);
   let probe;
   try {
-    probe = await fetch(streamUrl, { headers: { Range: "bytes=0-1" } });
+    probe = await fetch(streamUrl, { headers: { Range: "bytes=0-1" }, signal: controller.signal });
   } catch (err) {
-    preparing.textContent = "Couldn't reach the server.";
-    announce("Couldn't reach the server.");
+    preparing.textContent = err.name === "AbortError"
+      ? "This is taking longer than expected to prepare. Try again in a moment."
+      : "Couldn't reach the server.";
+    announce(preparing.textContent);
     return;
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   playerContainer.innerHTML = "";
@@ -304,11 +311,39 @@ async function playMedia(item, rowBtn) {
     return;
   }
 
+  if (!probe.ok) {
+    const msg = document.createElement("p");
+    msg.className = "player-message";
+    msg.textContent = "Couldn't prepare this file for playback. Please try again.";
+    playerContainer.appendChild(msg);
+    announce(msg.textContent);
+    return;
+  }
+
+  // A JSON body means the file needs HLS (container/audio remux) rather
+  // than being directly streamable -- anything else (200/206 on the probe)
+  // means it can be played directly, same as before.
+  let hlsPlaylistUrl = null;
+  if ((probe.headers.get("content-type") || "").includes("application/json")) {
+    const body = await probe.json().catch(() => null);
+    hlsPlaylistUrl = body && body.hls_playlist;
+    if (!hlsPlaylistUrl) {
+      const msg = document.createElement("p");
+      msg.className = "player-message";
+      msg.textContent = "Couldn't prepare this file for playback. Please try again.";
+      playerContainer.appendChild(msg);
+      announce(msg.textContent);
+      return;
+    }
+  }
+
   const tag = item.media_type === "audio" ? "audio" : "video";
   const el = document.createElement(tag);
   el.controls = true;
   el.autoplay = true;
-  el.src = streamUrl;
+  if (!hlsPlaylistUrl) {
+    el.src = streamUrl;
+  }
   if (tag === "video") {
     el.style.maxWidth = "100%";
     // A missing sidecar subtitle file just 404s -- the browser ignores
@@ -332,6 +367,27 @@ async function playMedia(item, rowBtn) {
   el.addEventListener("ended", () => clearResumePosition(item.id));
 
   playerContainer.appendChild(el);
+
+  if (hlsPlaylistUrl) {
+    if (el.canPlayType("application/vnd.apple.mpegurl")) {
+      // Safari has native HLS support built into <video> -- no library
+      // needed at all.
+      el.src = hlsPlaylistUrl;
+    } else if (window.Hls && window.Hls.isSupported()) {
+      const hls = new Hls();
+      hls.loadSource(hlsPlaylistUrl);
+      hls.attachMedia(el);
+    } else {
+      playerContainer.innerHTML = "";
+      const msg = document.createElement("p");
+      msg.className = "player-message";
+      msg.textContent = "This browser can't play this file's format.";
+      playerContainer.appendChild(msg);
+      announce(msg.textContent);
+      return;
+    }
+  }
+
   if (tag === "video") {
     requestVideoFullscreen(el);
   }

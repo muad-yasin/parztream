@@ -10,14 +10,14 @@ requires_ffmpeg = pytest.mark.skipif(
 )
 
 
-def _insert_media(path, media_type="audio", video_codec=None, audio_codec=None):
+def _insert_media(path, media_type="audio", video_codec=None, audio_codec=None, duration=None):
     with get_connection() as conn:
         cur = conn.execute(
             """
-            INSERT INTO media (path, media_type, title, size_bytes, video_codec, audio_codec)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO media (path, media_type, title, size_bytes, video_codec, audio_codec, duration)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (str(path), media_type, path.stem, path.stat().st_size, video_codec, audio_codec),
+            (str(path), media_type, path.stem, path.stat().st_size, video_codec, audio_codec, duration),
         )
         return cur.lastrowid
 
@@ -223,8 +223,70 @@ def test_compatible_mp4_streams_directly_without_transcoding(client, make_file):
     assert res.content == content
 
 
+def test_mkv_needing_remux_returns_an_hls_playlist_pointer(client, make_file):
+    # A container/audio remux is no longer done synchronously inline --
+    # the main stream endpoint just tells the frontend where to find the
+    # HLS playlist, so this doesn't need real ffmpeg to verify.
+    f = make_file("clip.mkv", b"not real video data")
+    media_id = _insert_media(f, "video", video_codec="h264", audio_codec="aac", duration=12.0)
+
+    res = client.get(f"/api/stream/{media_id}")
+
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "application/json"
+    assert res.json() == {"hls_playlist": f"/api/stream/{media_id}/hls/playlist.m3u8"}
+
+
+def test_hls_playlist_endpoint_serves_a_valid_vod_playlist(client, make_file):
+    f = make_file("clip.mkv", b"not real video data")
+    media_id = _insert_media(f, "video", video_codec="h264", audio_codec="aac", duration=12.0)
+
+    res = client.get(f"/api/stream/{media_id}/hls/playlist.m3u8")
+
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/vnd.apple.mpegurl")
+    assert "#EXT-X-ENDLIST" in res.text
+    assert "segment_00000.ts" in res.text
+
+
+def test_hls_playlist_endpoint_errors_cleanly_when_duration_unknown(client, make_file):
+    f = make_file("clip.mkv", b"not real video data")
+    media_id = _insert_media(f, "video", video_codec="h264", audio_codec="aac", duration=None)
+
+    res = client.get(f"/api/stream/{media_id}/hls/playlist.m3u8")
+
+    assert res.status_code == 500
+
+
+def test_hls_playlist_endpoint_404s_for_a_file_that_doesnt_need_remuxing(client, make_file):
+    f = make_file("clip.mp4", b"x" * 10)
+    media_id = _insert_media(f, "video", video_codec="h264", audio_codec="aac", duration=5.0)
+
+    res = client.get(f"/api/stream/{media_id}/hls/playlist.m3u8")
+
+    assert res.status_code == 400
+
+
+def test_hls_playlist_endpoint_still_415s_for_a_truly_unsupported_codec(client, make_file):
+    f = make_file("clip.mkv", b"not real video data")
+    media_id = _insert_media(f, "video", video_codec="hevc", audio_codec="aac", duration=5.0)
+
+    res = client.get(f"/api/stream/{media_id}/hls/playlist.m3u8")
+
+    assert res.status_code == 415
+
+
+def test_hls_segment_endpoint_rejects_malformed_segment_names(client, make_file):
+    f = make_file("clip.mkv", b"not real video data")
+    media_id = _insert_media(f, "video", video_codec="h264", audio_codec="aac", duration=12.0)
+
+    res = client.get(f"/api/stream/{media_id}/hls/../../etc/passwd")
+
+    assert res.status_code == 404
+
+
 @requires_ffmpeg
-def test_mkv_is_remuxed_and_served_as_playable_mp4(client, media_dir):
+def test_mkv_is_remuxed_into_hls_segments_and_served(client, media_dir):
     mkv_path = media_dir / "clip.mkv"
     subprocess.run(
         [
@@ -236,12 +298,30 @@ def test_mkv_is_remuxed_and_served_as_playable_mp4(client, media_dir):
         ],
         check=True,
     )
-    media_id = _insert_media(mkv_path, "video", video_codec="h264", audio_codec="aac")
+    media_id = _insert_media(mkv_path, "video", video_codec="h264", audio_codec="aac", duration=1.0)
 
-    res = client.get(f"/api/stream/{media_id}")
+    probe_res = client.get(f"/api/stream/{media_id}")
+    assert probe_res.status_code == 200
+    hls_url = probe_res.json()["hls_playlist"]
 
-    assert res.status_code == 200
-    assert res.headers["content-type"] == "video/mp4"
-    # Seeking should also work on the remuxed output, same as any other file.
-    range_res = client.get(f"/api/stream/{media_id}", headers={"Range": "bytes=0-99"})
-    assert range_res.status_code == 206
+    playlist_res = client.get(hls_url)
+    assert playlist_res.status_code == 200
+    assert "segment_00000.ts" in playlist_res.text
+
+    segment_res = client.get(f"/api/stream/{media_id}/hls/segment_00000.ts")
+    assert segment_res.status_code == 200
+    assert segment_res.headers["content-type"] == "video/mp2t"
+    assert len(segment_res.content) > 0
+
+
+@requires_ffmpeg
+def test_hls_segment_generation_failure_returns_a_clean_500(client, media_dir):
+    # Not real video data -- ffmpeg will fail to produce any segment from it.
+    bogus_path = media_dir / "clip.mkv"
+    bogus_path.write_bytes(b"this is not a real video file")
+    media_id = _insert_media(bogus_path, "video", video_codec="h264", audio_codec="aac", duration=5.0)
+
+    res = client.get(f"/api/stream/{media_id}/hls/segment_00000.ts")
+
+    assert res.status_code == 500
+    assert "conversion failed" in res.json()["detail"]
