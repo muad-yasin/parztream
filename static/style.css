@@ -168,6 +168,17 @@ main {
   gap: 1rem;
 }
 
+/* An ID selector otherwise beats the browser's built-in `[hidden] {
+   display: none}` (attribute selector, lower specificity) -- without
+   this, a hidden #search-view/#show-view/#home-view still renders via
+   the `display: grid` rules above. Confirmed live: the show page's
+   "Back" button leaked through onto the home screen before this existed. */
+#search-view[hidden],
+#show-view[hidden],
+#home-view[hidden] {
+  display: none;
+}
+
 #home-view {
   display: grid;
   gap: 1.5rem;
