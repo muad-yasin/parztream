@@ -36,8 +36,30 @@ SEGMENT_WAIT_TIMEOUT = 30
 
 class UnsupportedVideoCodec(Exception):
     """Raised when a video's codec itself (not just its container or audio
-    track) can't be played in a browser without a full re-encode, which
-    isn't implemented -- only cheap container/audio fixes are."""
+    track) can't be played in a browser without a full re-encode. Carries
+    enough context (transcode_enabled) for callers to give a genuinely
+    actionable message instead of a dead-end "can't play this" -- the two
+    real causes (transcoding opt-in never turned on vs. turned on but no
+    working encoder on this machine) call for different next steps."""
+
+    def __init__(self, codec: str, transcode_enabled: bool = False):
+        self.codec = codec
+        self.transcode_enabled = transcode_enabled
+        super().__init__(codec)
+
+    def user_message(self) -> str:
+        if self.transcode_enabled:
+            return (
+                f"Video codec '{self.codec}' can't be played in a browser, and no working "
+                "video transcoder was found on this server (checked hardware and software "
+                "encoders) -- see the server logs for what was tried."
+            )
+        return (
+            f"Video codec '{self.codec}' can't be played in a browser yet. Setting "
+            "PARZTREAM_ENABLE_TRANSCODE=1 lets the server convert it automatically during "
+            "playback -- this uses more CPU/GPU and may not keep up in real time on modest "
+            "hardware, so it's opt-in rather than always on."
+        )
 
 
 class NeedsHlsRemux(Exception):
@@ -93,10 +115,14 @@ def resolve_playable_path(row) -> Path:
         # default) and only attempted if a working encoder was actually
         # detected on this machine -- when either isn't true, this stays
         # exactly today's dead end (download-only), never a slow/broken
-        # attempt at a codec this box genuinely can't encode.
-        if config.TRANSCODE_ENABLED and encoder_detect.get_encoder() is not None:
-            raise NeedsHlsRemux(remux_audio=not audio_ok, reencode_video=True)
-        raise UnsupportedVideoCodec(video_codec)
+        # attempt at a codec this box genuinely can't encode. Short-circuit
+        # evaluation means get_encoder() is never even called (no probing
+        # subprocesses spawned) when transcoding isn't enabled at all.
+        if config.TRANSCODE_ENABLED:
+            if encoder_detect.get_encoder() is not None:
+                raise NeedsHlsRemux(remux_audio=not audio_ok, reencode_video=True)
+            raise UnsupportedVideoCodec(video_codec, transcode_enabled=True)
+        raise UnsupportedVideoCodec(video_codec, transcode_enabled=False)
 
     raise NeedsHlsRemux(remux_audio=not audio_ok)
 
@@ -310,16 +336,24 @@ def _start_job(
     seek_args = ["-ss", str(start_index * SEGMENT_SECONDS)] if start_index else []
     segment_pattern = str(hls_dir / "segment_%05d.ts")
 
+    pre_input_args = []
     if reencode_video:
         # Only reached when resolve_playable_path already confirmed
         # config.TRANSCODE_ENABLED and a working encoder -- get_encoder()
-        # is cached, this doesn't re-probe.
-        video_args = ["-c:v", encoder_detect.get_encoder(), *_scale_args(video_width, video_height)]
+        # is cached, this doesn't re-probe. encode_video_args also wires up
+        # whatever hwupload/device plumbing this specific encoder needs
+        # (see app/encoder_detect.py) -- VAAPI/QSV can't just take -c:v on
+        # its own the way stream-copy or NVENC/software can.
+        encoder = encoder_detect.get_encoder()
+        scale_args = _scale_args(video_width, video_height)
+        scale_filter = scale_args[1] if scale_args else ""
+        pre_input_args, video_args = encoder_detect.encode_video_args(encoder, video_width, video_height, scale_filter)
     else:
         video_args = ["-c:v", "copy"]  # today's exact stream-copy path, untouched
 
     cmd = [
         "ffmpeg", "-y", "-v", "error",
+        *pre_input_args,
         *seek_args,
         "-i", str(src_path),
         *video_args, *audio_args,

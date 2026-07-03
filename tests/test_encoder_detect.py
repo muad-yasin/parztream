@@ -1,4 +1,6 @@
+import glob
 import shutil
+import subprocess
 import threading
 import time
 
@@ -8,6 +10,10 @@ from app import encoder_detect
 
 requires_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None, reason="ffmpeg not installed"
+)
+
+requires_vaapi_render_node = pytest.mark.skipif(
+    not glob.glob("/dev/dri/renderD*"), reason="no VAAPI render node on this machine"
 )
 
 
@@ -114,9 +120,113 @@ def test_concurrent_first_callers_only_trigger_one_probe_round(monkeypatch):
 
 @requires_ffmpeg
 def test_real_detection_finds_a_working_encoder():
-    # This dev environment has no GPU/hardware encode path available, so
-    # detection is expected to fall through every hardware candidate and
-    # land on the software fallback -- this confirms the real subprocess
-    # plumbing (ffmpeg -encoders parsing, the synthetic test-encode) works
-    # end to end, not just the mocked logic above.
+    # Confirms the real subprocess plumbing (ffmpeg -encoders parsing, the
+    # synthetic test-encode) works end to end, not just the mocked logic
+    # above -- whichever encoder actually wins depends on this machine's
+    # real hardware (a dev box with no GPU falls through to the software
+    # fallback; one with a working VAAPI/NVENC/etc. path may not).
     assert encoder_detect.get_encoder() is not None
+
+
+def test_hwaccel_pre_input_args_is_empty_for_plain_encoders():
+    # NVENC/AMF/VideoToolbox accept normal software frames directly --
+    # no device init needed before -i, unlike VAAPI/QSV below.
+    assert encoder_detect._hwaccel_pre_input_args("h264_nvenc") == []
+    assert encoder_detect._hwaccel_pre_input_args("libopenh264") == []
+
+
+def test_hwaccel_pre_input_args_for_qsv_is_always_present():
+    assert encoder_detect._hwaccel_pre_input_args("h264_qsv") == [
+        "-init_hw_device", "qsv=hw", "-filter_hw_device", "hw",
+    ]
+
+
+def test_hwaccel_pre_input_args_for_vaapi_uses_the_detected_device(monkeypatch):
+    monkeypatch.setattr(encoder_detect, "_vaapi_device_path", lambda: "/dev/dri/renderD128")
+    assert encoder_detect._hwaccel_pre_input_args("h264_vaapi") == [
+        "-vaapi_device", "/dev/dri/renderD128",
+    ]
+
+
+def test_hwaccel_pre_input_args_for_vaapi_is_none_without_a_render_node(monkeypatch):
+    # None (not []) signals "can't even attempt this candidate here" --
+    # distinct from "attempted and failed", so callers skip straight past
+    # it instead of spawning a doomed ffmpeg process.
+    monkeypatch.setattr(encoder_detect, "_vaapi_device_path", lambda: None)
+    assert encoder_detect._hwaccel_pre_input_args("h264_vaapi") is None
+
+
+def test_hwaccel_upload_filter_empty_for_plain_encoders():
+    assert encoder_detect._hwaccel_upload_filter("h264_nvenc") == ""
+    assert encoder_detect._hwaccel_upload_filter("libopenh264") == ""
+
+
+def test_encode_video_args_for_plain_encoder_with_and_without_scale():
+    assert encoder_detect.encode_video_args("libopenh264", None, None, "") == (
+        [], ["-c:v", "libopenh264"],
+    )
+    assert encoder_detect.encode_video_args("libopenh264", None, None, "scale=640:-1") == (
+        [], ["-c:v", "libopenh264", "-vf", "scale=640:-1"],
+    )
+
+
+def test_encode_video_args_for_vaapi_combines_scale_and_upload_filter(monkeypatch):
+    monkeypatch.setattr(encoder_detect, "_vaapi_device_path", lambda: "/dev/dri/renderD128")
+
+    pre_input, video_args = encoder_detect.encode_video_args("h264_vaapi", None, None, "scale=640:-1")
+
+    assert pre_input == ["-vaapi_device", "/dev/dri/renderD128"]
+    assert video_args == ["-c:v", "h264_vaapi", "-vf", "scale=640:-1,format=nv12,hwupload"]
+
+
+def test_encode_video_args_for_vaapi_without_scale_still_uploads(monkeypatch):
+    monkeypatch.setattr(encoder_detect, "_vaapi_device_path", lambda: "/dev/dri/renderD128")
+
+    pre_input, video_args = encoder_detect.encode_video_args("h264_vaapi", None, None, "")
+
+    assert video_args == ["-c:v", "h264_vaapi", "-vf", "format=nv12,hwupload"]
+
+
+def test_encode_video_args_returns_none_when_vaapi_device_unavailable(monkeypatch):
+    monkeypatch.setattr(encoder_detect, "_vaapi_device_path", lambda: None)
+    assert encoder_detect.encode_video_args("h264_vaapi", None, None, "") == (None, None)
+
+
+def test_try_encode_skips_vaapi_without_spawning_ffmpeg_when_no_render_node(monkeypatch):
+    monkeypatch.setattr(encoder_detect, "_vaapi_device_path", lambda: None)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("should never spawn ffmpeg when there's no render node to target")
+
+    monkeypatch.setattr(subprocess, "run", fail_if_called)
+
+    assert encoder_detect._try_encode("h264_vaapi") is False
+
+
+@requires_ffmpeg
+@requires_vaapi_render_node
+def test_real_vaapi_probe_gets_past_pixel_format_negotiation():
+    # Regression test for the actual bug this was written to fix: without
+    # -vaapi_device + a format=nv12,hwupload filter, ffmpeg fails
+    # immediately with a pixel-format negotiation error ("Impossible to
+    # convert between the formats supported by the filter...") before ever
+    # reaching real hardware capability checks -- confirmed by manually
+    # reproducing that exact failure against this same real render node
+    # before this fix existed. This test can't assert the probe *succeeds*
+    # (that depends on whether this machine's GPU/driver actually exposes
+    # an H.264 encode profile via VAAPI, which varies by hardware -- this
+    # sandbox's own GPU does not), only that it no longer fails at the
+    # wiring stage.
+    pre_input_args, video_args = encoder_detect.encode_video_args("h264_vaapi", None, None, "")
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error",
+            *pre_input_args,
+            "-f", "lavfi", "-i", "color=c=black:size=64x64:rate=1:duration=1",
+            "-frames:v", "1",
+            *video_args,
+            "-f", "null", "-",
+        ],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert "Impossible to convert between the formats" not in result.stderr

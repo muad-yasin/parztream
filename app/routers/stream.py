@@ -47,10 +47,7 @@ def stream_media(media_id: int, request: Request, original: bool = False):
         try:
             path = transcode.resolve_playable_path(row)
         except transcode.UnsupportedVideoCodec as exc:
-            raise HTTPException(
-                status_code=415,
-                detail=f"Video codec '{exc}' can't be played in a browser yet",
-            )
+            raise HTTPException(status_code=415, detail=exc.user_message())
         except transcode.NeedsHlsRemux:
             # Tells the frontend to switch to HLS playback instead of
             # treating this endpoint as a directly-streamable file -- the
@@ -120,10 +117,7 @@ def _require_hls(row):
     try:
         transcode.resolve_playable_path(row)
     except transcode.UnsupportedVideoCodec as exc:
-        raise HTTPException(
-            status_code=415,
-            detail=f"Video codec '{exc}' can't be played in a browser yet",
-        )
+        raise HTTPException(status_code=415, detail=exc.user_message())
     except transcode.NeedsHlsRemux as exc:
         return exc.remux_audio, exc.reencode_video
     raise HTTPException(status_code=400, detail="This file doesn't need HLS remuxing")

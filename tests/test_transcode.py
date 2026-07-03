@@ -376,8 +376,13 @@ def test_incompatible_codec_with_transcode_disabled_raises_unsupported(tmp_path,
     f.write_bytes(b"x")
     row = _row(path=str(f), video_codec="hevc", audio_codec="aac")
 
-    with pytest.raises(transcode.UnsupportedVideoCodec):
+    with pytest.raises(transcode.UnsupportedVideoCodec) as exc_info:
         transcode.resolve_playable_path(row)
+    # The two ways to land here (never opted in vs. opted in but no working
+    # encoder) call for different next steps -- the message should point
+    # the user at turning transcoding on, not claim it was already tried.
+    assert exc_info.value.transcode_enabled is False
+    assert "PARZTREAM_ENABLE_TRANSCODE" in exc_info.value.user_message()
 
 
 def test_incompatible_codec_with_transcode_enabled_but_no_encoder_raises_unsupported(tmp_path, monkeypatch):
@@ -387,8 +392,14 @@ def test_incompatible_codec_with_transcode_enabled_but_no_encoder_raises_unsuppo
     f.write_bytes(b"x")
     row = _row(path=str(f), video_codec="hevc", audio_codec="aac")
 
-    with pytest.raises(transcode.UnsupportedVideoCodec):
+    with pytest.raises(transcode.UnsupportedVideoCodec) as exc_info:
         transcode.resolve_playable_path(row)
+    # Already enabled -- telling the user to set the flag again would be
+    # actively misleading, the message must say no encoder was found instead.
+    assert exc_info.value.transcode_enabled is True
+    message = exc_info.value.user_message()
+    assert "PARZTREAM_ENABLE_TRANSCODE" not in message
+    assert "no working" in message
 
 
 def test_incompatible_codec_with_transcode_enabled_and_encoder_found_needs_hls_remux(tmp_path, monkeypatch):

@@ -1,3 +1,4 @@
+import glob
 import logging
 import subprocess
 import sys
@@ -83,14 +84,87 @@ def _list_encoders():
     return names
 
 
+# h264_vaapi/h264_qsv need frames already sitting on a hardware surface
+# before the encoder will even open -- pointing either at a plain
+# software-decoded frame fails immediately (confirmed real against an
+# actual VAAPI render node: "Could not open encoder before EOF" without
+# this wiring). NVENC/AMF/VideoToolbox accept normal software frames
+# directly and upload internally, so they need none of this and are never
+# passed to these two helpers.
+_HWACCEL_ENCODERS = {"h264_vaapi", "h264_qsv"}
+
+
+def _vaapi_device_path():
+    """The render node ffmpeg's -vaapi_device should target. Picks the
+    first of possibly several GPUs present -- good enough for this
+    project's realistic single-GPU home-server/NAS/laptop targets; a
+    multi-GPU box wanting a specific one can't be auto-detected correctly
+    anyway and would need a real device-selection option, out of scope
+    here. None if the machine has no render node at all (no GPU, or one
+    without a kernel driver bound), in which case h264_vaapi can never
+    work regardless of what ffmpeg itself reports supporting."""
+    candidates = sorted(glob.glob("/dev/dri/renderD*"))
+    return candidates[0] if candidates else None
+
+
+def _hwaccel_pre_input_args(name: str):
+    """ffmpeg args that must appear before -i to initialize the hardware
+    device VAAPI/QSV encoding needs. None (not []) specifically means this
+    candidate can't even be attempted here (e.g. vaapi with no render node
+    present) -- distinct from "attempted and failed", so callers don't
+    spawn a doomed ffmpeg process just to get the same answer more slowly."""
+    if name == "h264_vaapi":
+        device = _vaapi_device_path()
+        return None if device is None else ["-vaapi_device", device]
+    if name == "h264_qsv":
+        return ["-init_hw_device", "qsv=hw", "-filter_hw_device", "hw"]
+    return []
+
+
+def _hwaccel_upload_filter(name: str) -> str:
+    """The tail of a -vf filter chain that uploads a software frame onto
+    the hardware surface VAAPI/QSV require -- appended after any scaling,
+    since scaling itself still happens in software pixel-format space.
+    Empty string for every other encoder (nothing to append)."""
+    if name == "h264_vaapi":
+        return "format=nv12,hwupload"
+    if name == "h264_qsv":
+        return "format=nv12,hwupload=extra_hw_frames=64"
+    return ""
+
+
+def encode_video_args(name: str, width, height, scale_filter: str = ""):
+    """Builds the (pre_input_args, video_args) ffmpeg needs for a real
+    re-encode with the given -c:v value -- shared by this module's own
+    probing and app/transcode.py's real per-segment job, so the two can
+    never drift apart (e.g. the probe passing but the real job missing the
+    hwupload wiring, or vice versa). scale_filter is the caller's own
+    already-built -vf chain (e.g. app/transcode.py's _scale_args), passed
+    in rather than computed here since resolution-cap logic doesn't belong
+    in this module."""
+    pre_input_args = _hwaccel_pre_input_args(name)
+    if pre_input_args is None:
+        return None, None
+    upload_filter = _hwaccel_upload_filter(name)
+    if not upload_filter:
+        video_args = ["-c:v", name] + (["-vf", scale_filter] if scale_filter else [])
+        return pre_input_args, video_args
+    combined = f"{scale_filter},{upload_filter}" if scale_filter else upload_filter
+    return pre_input_args, ["-c:v", name, "-vf", combined]
+
+
 def _try_encode(name: str) -> bool:
+    pre_input_args, video_args = encode_video_args(name, None, None)
+    if pre_input_args is None:
+        return False  # e.g. h264_vaapi candidate but no render node present
     try:
         result = subprocess.run(
             [
                 "ffmpeg", "-y", "-v", "error",
+                *pre_input_args,
                 "-f", "lavfi", "-i", "color=c=black:size=64x64:rate=1:duration=1",
                 "-frames:v", "1",
-                "-c:v", name,
+                *video_args,
                 "-f", "null", "-",
             ],
             capture_output=True, timeout=_PROBE_TIMEOUT,
