@@ -6,6 +6,7 @@ const selectedListEl = document.getElementById("selected-list");
 const noFoldersMessage = document.getElementById("no-folders-message");
 const saveBtn = document.getElementById("save-btn");
 const errorEl = document.getElementById("setup-error");
+const addStatusEl = document.getElementById("add-status");
 
 let currentPath = null;
 let currentParent = null;
@@ -28,6 +29,7 @@ async function browse(path) {
   currentPath = data.path;
   currentParent = data.parent;
   errorEl.textContent = "";
+  addStatusEl.textContent = "";
   renderBrowser(data.directories);
 }
 
@@ -87,10 +89,16 @@ upBtn.addEventListener("click", () => {
 });
 
 addFolderBtn.addEventListener("click", () => {
-  if (currentPath && !selectedFolders.includes(currentPath)) {
-    selectedFolders.push(currentPath);
-    renderSelected();
+  if (!currentPath) return;
+  if (selectedFolders.includes(currentPath)) {
+    // Was previously a silent no-op -- a user clicking "Add this folder"
+    // twice had no way to tell whether the second click registered.
+    addStatusEl.textContent = "That folder is already added.";
+    return;
   }
+  selectedFolders.push(currentPath);
+  renderSelected();
+  addStatusEl.textContent = `Added "${currentPath}".`;
 });
 
 saveBtn.addEventListener("click", async () => {

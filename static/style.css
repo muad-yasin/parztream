@@ -115,6 +115,36 @@ button:hover {
   background: #2c3038;
 }
 
+/* Marks the one completing action of a flow (e.g. setup's "Save & start
+   scanning") so it doesn't carry the same visual weight as a secondary
+   action like "Remove" right next to it -- every button used to share this
+   same neutral style with no way to tell which one mattered most. */
+.btn-primary {
+  background: #7aa2f7;
+  color: #14161a;
+  border-color: #7aa2f7;
+  font-weight: 600;
+}
+
+.btn-primary:hover {
+  background: #91b3f8;
+}
+
+/* A thin vertical rule separating "things that filter what you see"
+   (search/type/show) from "things that act" (scan/settings/logout) in the
+   header -- previously all six controls sat in one undifferentiated row. */
+.controls-divider {
+  width: 1px;
+  align-self: stretch;
+  background: #2a2e35;
+}
+
+@media (max-width: 640px) {
+  .controls-divider {
+    display: none;
+  }
+}
+
 main {
   display: grid;
   grid-template-columns: 1fr;
@@ -233,6 +263,19 @@ ul#media-list li:last-child {
   outline-offset: -2px;
 }
 
+/* The row currently loaded in the player -- otherwise, once something's
+   playing, there's no way to tell which row it came from after scrolling
+   or changing pages. Inset box-shadow instead of a border so it doesn't
+   shift the row's padding/content. */
+.row-btn-active {
+  background: #1e2127;
+  box-shadow: inset 3px 0 0 #7aa2f7;
+}
+
+.row-btn-active:hover {
+  background: #23262c;
+}
+
 .row-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -246,6 +289,17 @@ ul#media-list li:last-child {
   object-fit: cover;
   background: #2a2e35;
   flex-shrink: 0;
+}
+
+/* Swapped in when a thumbnail fails to load -- previously the <img> was
+   just hidden, leaving an empty gap that reads as a rendering bug rather
+   than "no artwork available". */
+.thumb-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9aa0aa;
+  font-size: 1.1rem;
 }
 
 ul#media-list li.empty-message {
@@ -382,4 +436,21 @@ ul#media-list li.empty-message {
 #add-folder-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* No responsive rules existed for the setup page at all -- long server
+   paths in #current-path/#selected-list could push the fixed-width up-btn
+   or Remove button off a narrow screen without room to wrap. */
+@media (max-width: 640px) {
+  .setup-main {
+    padding: 1rem;
+  }
+
+  .browser-path {
+    flex-wrap: wrap;
+  }
+
+  #selected-list li {
+    flex-wrap: wrap;
+  }
 }

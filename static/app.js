@@ -124,8 +124,16 @@ async function loadLibrary() {
   }
 }
 
+// Tracks which item is currently loaded in the player so its row can be
+// highlighted -- kept as an id (survives across re-renders from filtering/
+// paging) plus the live button reference (for restyling without a
+// full reload when play starts).
+let activePlayingId = null;
+let activeRowBtn = null;
+
 function renderList(items, query) {
   listEl.innerHTML = "";
+  activeRowBtn = null;
 
   if (items.length === 0) {
     const empty = document.createElement("li");
@@ -147,7 +155,15 @@ function renderList(items, query) {
     img.loading = "lazy";
     img.src = `/api/library/${item.id}/art`;
     img.alt = ""; // decorative -- the label span below already names the item
-    img.onerror = () => { img.style.visibility = "hidden"; };
+    img.onerror = () => {
+      // Previously just hid the broken image, leaving an empty gap that
+      // looked like a rendering bug rather than "no artwork available".
+      const placeholder = document.createElement("span");
+      placeholder.className = "thumb thumb-placeholder";
+      placeholder.setAttribute("aria-hidden", "true");
+      placeholder.textContent = item.media_type === "audio" ? "♪" : "▶";
+      img.replaceWith(placeholder);
+    };
     rowBtn.appendChild(img);
 
     const label = document.createElement("span");
@@ -155,9 +171,16 @@ function renderList(items, query) {
     const episodeTag = item.show_name ? `S${item.season_number}E${item.episode_number} — ` : "";
     const title = item.artist ? `${item.title} — ${item.artist}` : (item.title || item.path);
     label.textContent = episodeTag + title;
+    label.title = label.textContent; // full text on hover once ellipsis truncates it
     rowBtn.appendChild(label);
 
-    rowBtn.addEventListener("click", () => playMedia(item));
+    if (item.id === activePlayingId) {
+      rowBtn.classList.add("row-btn-active");
+      rowBtn.setAttribute("aria-current", "true");
+      activeRowBtn = rowBtn;
+    }
+
+    rowBtn.addEventListener("click", () => playMedia(item, rowBtn));
     li.appendChild(rowBtn);
     listEl.appendChild(li);
   }
@@ -191,8 +214,52 @@ function renderPager(total) {
   pagerEl.append(prevBtn, info, nextBtn);
 }
 
-async function playMedia(item) {
+// Playback position is persisted client-side only (no backend support for
+// this yet) -- good enough for "resume where I left off on this device",
+// which is the case that actually comes up for a home-LAN single-user tool.
+function resumeKey(id) {
+  return `parztream:resume:${id}`;
+}
+
+function saveResumePosition(id, time) {
+  try {
+    localStorage.setItem(resumeKey(id), String(time));
+  } catch (err) {
+    // localStorage can be unavailable (private browsing, quota) -- resume
+    // is a nice-to-have, never worth breaking playback over.
+  }
+}
+
+function clearResumePosition(id) {
+  try {
+    localStorage.removeItem(resumeKey(id));
+  } catch (err) {
+    // See above.
+  }
+}
+
+function getResumePosition(id) {
+  try {
+    const value = localStorage.getItem(resumeKey(id));
+    return value ? parseFloat(value) : 0;
+  } catch (err) {
+    return 0;
+  }
+}
+
+async function playMedia(item, rowBtn) {
   const streamUrl = `/api/stream/${item.id}`;
+
+  if (activeRowBtn) {
+    activeRowBtn.classList.remove("row-btn-active");
+    activeRowBtn.removeAttribute("aria-current");
+  }
+  activePlayingId = item.id;
+  if (rowBtn) {
+    rowBtn.classList.add("row-btn-active");
+    rowBtn.setAttribute("aria-current", "true");
+  }
+  activeRowBtn = rowBtn || null;
 
   playerContainer.innerHTML = "";
   const preparing = document.createElement("p");
@@ -253,6 +320,17 @@ async function playMedia(item) {
     track.label = "Subtitles";
     el.appendChild(track);
   }
+  el.addEventListener("loadedmetadata", () => {
+    const resumeAt = getResumePosition(item.id);
+    // Ignore a saved position in the last few seconds -- that's effectively
+    // "finished", resuming there would just replay the very end.
+    if (resumeAt > 5 && resumeAt < el.duration - 5) {
+      el.currentTime = resumeAt;
+    }
+  });
+  el.addEventListener("timeupdate", () => saveResumePosition(item.id, el.currentTime));
+  el.addEventListener("ended", () => clearResumePosition(item.id));
+
   playerContainer.appendChild(el);
   if (tag === "video") {
     requestVideoFullscreen(el);
