@@ -386,7 +386,47 @@ def _probe_video_info(path: Path):
         elif stream.get("codec_type") == "audio" and audio_codec is None:
             audio_codec = stream.get("codec_name")
 
+    if duration is None:
+        duration = _probe_duration_via_packets(path)
+
     return duration, video_codec, audio_codec, width, height
+
+
+def _probe_duration_via_packets(path: Path):
+    """Fallback for containers with no Duration in their header -- seen in
+    the wild on .mkv "featurette"/bonus-content files muxed through a
+    non-seekable pipe (mkvmerge/ffmpeg piped straight to stdout), which
+    can't seek back afterward to write Matroska's Segment Duration
+    element. format.duration then comes back empty even though the file
+    plays fine and its codec/width/height are readable. This walks the
+    video stream's packet headers (demuxing only, no real decode) to find
+    the last packet's pts_time, which is a real, cheap-enough duration
+    estimate."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "packet=pts_time",
+                "-of", "csv=print_section=0",
+                str(path),
+            ],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+
+    last_pts = None
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line or line == "N/A":
+            continue
+        try:
+            last_pts = float(line)
+        except ValueError:
+            continue
+
+    return last_pts
 
 
 def _remove_missing(conn, found_paths: set):

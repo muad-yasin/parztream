@@ -377,6 +377,33 @@ def test_real_mp4_video_and_audio_codecs_are_recorded(media_dir):
 
 
 @requires_ffmpeg
+def test_mkv_with_no_header_duration_falls_back_to_packet_scan(media_dir):
+    # Piping ffmpeg's matroska output through stdout (rather than writing
+    # directly to a seekable file) means the muxer can never seek back to
+    # write Segment Duration -- this reproduces real "Featurettes"/bonus-
+    # content files from certain scene releases, where format.duration
+    # comes back empty even though the file plays fine.
+    mkv_path = media_dir / "featurette.mkv"
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-c:v", "libopenh264", "-c:a", "aac", "-shortest",
+            "-f", "matroska", "-",
+        ],
+        check=True, capture_output=True,
+    )
+    mkv_path.write_bytes(proc.stdout)
+
+    scanner.scan_media_dirs()
+
+    row = _rows()[0]
+    assert row["media_type"] == "video"
+    assert row["duration"] == pytest.approx(1.0, abs=0.3)
+
+
+@requires_ffmpeg
 def test_real_mp3_tags_and_duration_are_extracted(media_dir):
     mp3_path = media_dir / "real.mp3"
     subprocess.run(
