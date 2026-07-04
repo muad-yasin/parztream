@@ -38,6 +38,20 @@ def browser_type_launch_args(browser_type_launch_args):
     }
 
 
+def _h264_encoder():
+    """Whichever H.264 encoder this ffmpeg ships (GPL builds have libx264,
+    parztream's vendored LGPL builds have libopenh264). Duplicated from
+    tests/conftest.py on purpose -- this conftest deliberately shares
+    nothing with the in-process unit-test fixtures."""
+    listed = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True
+    ).stdout
+    encoder = next((e for e in ("libx264", "libopenh264") if e in listed), None)
+    if encoder is None:
+        pytest.skip("this ffmpeg build has no H.264 encoder (libx264/libopenh264)")
+    return encoder
+
+
 @pytest.fixture(scope="session")
 def media_root(tmp_path_factory):
     """A tiny real media library, synthesized once per session with ffmpeg.
@@ -46,6 +60,7 @@ def media_root(tmp_path_factory):
     movie-folder heuristic titles it "Inception (2010)" and flags it
     is_movie, which is what puts it on the home screen's Movies grid.
     """
+    encoder = _h264_encoder()
     root = tmp_path_factory.mktemp("e2e-media")
     movie_dir = root / "media" / "Inception (2010)"
     movie_dir.mkdir(parents=True)
@@ -55,15 +70,16 @@ def media_root(tmp_path_factory):
             "-f", "lavfi", "-i", "color=c=blue:size=320x240:duration=8",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=8",
             # Force a keyframe every second: a static synthetic clip has no
-            # scene cuts, so x264 would otherwise emit a single keyframe at
-            # t=0 -- and app/transcode.py's segment muxer can only split at
-            # keyframes, so segment 0 would swallow the whole clip and the
-            # on-demand `-ss 6` job for segment 1 would seek back to that
-            # lone keyframe and produce a byte-identical duplicate, which a
-            # real browser rejects with a decode error. Real video has
-            # regular keyframes; without these flags the fixture doesn't.
-            "-c:v", "libx264", "-g", "25", "-keyint_min", "25",
-            "-sc_threshold", "0",
+            # scene cuts, so the encoder would otherwise emit a single
+            # keyframe at t=0 -- and app/transcode.py's segment muxer can
+            # only split at keyframes, so segment 0 would swallow the whole
+            # clip and the on-demand `-ss 6` job for segment 1 would seek
+            # back to that lone keyframe and produce a byte-identical
+            # duplicate, which a real browser rejects with a decode error.
+            # Real video has regular keyframes; without this the fixture
+            # doesn't. (-force_key_frames rather than -g/-sc_threshold
+            # because it works identically for libx264 and libopenh264.)
+            "-c:v", encoder, "-force_key_frames", "expr:gte(t,n_forced)",
             "-c:a", "aac", "-shortest",
             str(movie_dir / "Inception.2010.1080p.BluRay.x264-GROUP.mkv"),
         ],

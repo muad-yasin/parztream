@@ -125,6 +125,17 @@ def test_real_detection_finds_a_working_encoder():
     # above -- whichever encoder actually wins depends on this machine's
     # real hardware (a dev box with no GPU falls through to the software
     # fallback; one with a working VAAPI/NVENC/etc. path may not).
+    #
+    # Only meaningful when libopenh264 is compiled in: it's the sole
+    # candidate guaranteed to work without a GPU, so on a build without it
+    # (GPL ffmpeg, e.g. CI's or most distros') a GPU-less machine
+    # legitimately detects nothing and None is the *correct* answer, not a
+    # plumbing failure.
+    listed = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True
+    ).stdout
+    if "libopenh264" not in listed:
+        pytest.skip("this ffmpeg lacks libopenh264, the only no-hardware candidate")
     assert encoder_detect.get_encoder() is not None
 
 

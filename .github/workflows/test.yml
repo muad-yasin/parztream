@@ -22,7 +22,17 @@ jobs:
 
       # Real ffmpeg/ffprobe on PATH so the integration tests marked
       # requires_ffmpeg actually run here instead of silently skipping.
-      - uses: FedericoCarboni/setup-ffmpeg@v3
+      # Ubuntu uses the distro package: setup-ffmpeg's Linux build was
+      # observed to SIGSEGV in ffprobe when reading the MPEG-TS segments
+      # app/transcode.py produces (first run of this workflow) -- apt's
+      # build is solid. No such issue with its Windows build.
+      - name: Install ffmpeg (apt)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install ffmpeg (setup-ffmpeg)
+        if: runner.os == 'Windows'
+        uses: FedericoCarboni/setup-ffmpeg@v3
 
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
@@ -40,7 +50,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: FedericoCarboni/setup-ffmpeg@v3
+      # Same reasoning as the unit job: apt's build, not setup-ffmpeg's.
+      - name: Install ffmpeg (apt)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: Install dependencies
         run: pip install -r requirements-dev.txt

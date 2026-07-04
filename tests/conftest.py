@@ -1,7 +1,43 @@
+import shutil
+import subprocess
+
 import pytest
 from fastapi.testclient import TestClient
 
 from app import artwork, auth, cache, config, db, main, scanner, transcode
+
+_H264_ENCODER = "unprobed"
+
+
+def _available_h264_encoder():
+    """The H.264 encoder this machine's ffmpeg actually ships, or None.
+
+    Test-media synthesis can't hardcode one: GPL ffmpeg builds (distro
+    packages, CI) bundle libx264, while the LGPL builds parztream vendors
+    bundle libopenh264 -- each is missing from the other family, and both
+    families are realistic dev environments here. Probed once per session.
+    """
+    global _H264_ENCODER
+    if _H264_ENCODER == "unprobed":
+        if shutil.which("ffmpeg") is None:
+            _H264_ENCODER = None
+        else:
+            listed = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-encoders"],
+                capture_output=True, text=True,
+            ).stdout
+            _H264_ENCODER = next(
+                (e for e in ("libx264", "libopenh264") if e in listed), None
+            )
+    return _H264_ENCODER
+
+
+@pytest.fixture
+def h264_encoder():
+    encoder = _available_h264_encoder()
+    if encoder is None:
+        pytest.skip("this ffmpeg build has no H.264 encoder (libx264/libopenh264)")
+    return encoder
 
 
 @pytest.fixture

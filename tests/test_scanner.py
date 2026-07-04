@@ -53,7 +53,7 @@ def test_classifies_by_extension_and_ignores_unknown_files(make_file, monkeypatc
 
     scanner.scan_media_dirs()
 
-    rows = {r["path"].rsplit("/", 1)[-1]: r for r in _rows()}
+    rows = {Path(r["path"]).name: r for r in _rows()}
     assert set(rows) == {"song.mp3", "audiobook.m4b", "clip.mkv"}
     assert rows["song.mp3"]["media_type"] == "audio"
     assert rows["audiobook.m4b"]["media_type"] == "audio"
@@ -203,7 +203,7 @@ def test_scan_populates_show_fields_for_episode_style_filenames(make_file, monke
 
     scanner.scan_media_dirs()
 
-    rows = {r["path"].rsplit("/", 1)[-1]: r for r in _rows()}
+    rows = {Path(r["path"]).name: r for r in _rows()}
     assert rows["The Chosen S01E02.mp4"]["show_name"] == "The Chosen"
     assert rows["The Chosen S01E02.mp4"]["season_number"] == 1
     assert rows["The Chosen S01E02.mp4"]["episode_number"] == 2
@@ -498,7 +498,7 @@ def test_choose_audio_stream(audio_streams, expected_index):
 
 
 @requires_ffmpeg
-def test_scan_picks_english_audio_track_over_earlier_non_english_one(make_file):
+def test_scan_picks_english_audio_track_over_earlier_non_english_one(make_file, h264_encoder):
     path = make_file("multitrack.mkv")
     subprocess.run(
         [
@@ -507,7 +507,7 @@ def test_scan_picks_english_audio_track_over_earlier_non_english_one(make_file):
             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
             "-f", "lavfi", "-i", "sine=frequency=880:duration=1",
             "-map", "0:v", "-map", "1:a", "-map", "2:a",
-            "-c:v", "libopenh264", "-c:a", "ac3",
+            "-c:v", h264_encoder, "-c:a", "ac3",
             "-metadata:s:a:0", "language=fre",
             "-metadata:s:a:1", "language=eng",
             str(path),
@@ -522,14 +522,14 @@ def test_scan_picks_english_audio_track_over_earlier_non_english_one(make_file):
 
 
 @requires_ffmpeg
-def test_scan_falls_back_to_first_track_when_no_english_available(make_file):
+def test_scan_falls_back_to_first_track_when_no_english_available(make_file, h264_encoder):
     path = make_file("foreign_only.mkv")
     subprocess.run(
         [
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=1",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
-            "-c:v", "libopenh264", "-c:a", "ac3",
+            "-c:v", h264_encoder, "-c:a", "ac3",
             "-metadata:s:a:0", "language=fre",
             str(path),
         ],
@@ -543,7 +543,7 @@ def test_scan_falls_back_to_first_track_when_no_english_available(make_file):
 
 
 @requires_ffmpeg
-def test_scan_records_multichannel_audio_channel_count(make_file):
+def test_scan_records_multichannel_audio_channel_count(make_file, h264_encoder):
     path = make_file("surround.mkv")
     subprocess.run(
         [
@@ -552,7 +552,7 @@ def test_scan_records_multichannel_audio_channel_count(make_file):
             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
             "-filter_complex", "[1:a]pan=5.1|FL=c0|FR=c0|FC=c0|LFE=c0|BL=c0|BR=c0[a51]",
             "-map", "0:v", "-map", "[a51]",
-            "-c:v", "libopenh264", "-c:a", "ac3",
+            "-c:v", h264_encoder, "-c:a", "ac3",
             str(path),
         ],
         check=True,
@@ -621,14 +621,14 @@ def test_scan_does_not_retitle_a_season_folder_with_only_one_episode_so_far(make
 
 
 @requires_ffmpeg
-def test_real_mp4_video_and_audio_codecs_are_recorded(media_dir):
+def test_real_mp4_video_and_audio_codecs_are_recorded(media_dir, h264_encoder):
     mp4_path = media_dir / "clip.mp4"
     subprocess.run(
         [
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=1",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
-            "-c:v", "libx264", "-c:a", "aac", "-shortest",
+            "-c:v", h264_encoder, "-c:a", "aac", "-shortest",
             str(mp4_path),
         ],
         check=True,
@@ -644,7 +644,7 @@ def test_real_mp4_video_and_audio_codecs_are_recorded(media_dir):
 
 
 @requires_ffmpeg
-def test_mkv_with_no_header_duration_falls_back_to_packet_scan(media_dir):
+def test_mkv_with_no_header_duration_falls_back_to_packet_scan(media_dir, h264_encoder):
     # Piping ffmpeg's matroska output through stdout (rather than writing
     # directly to a seekable file) means the muxer can never seek back to
     # write Segment Duration -- this reproduces real "Featurettes"/bonus-
@@ -656,7 +656,7 @@ def test_mkv_with_no_header_duration_falls_back_to_packet_scan(media_dir):
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=1",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
-            "-c:v", "libopenh264", "-c:a", "aac", "-shortest",
+            "-c:v", h264_encoder, "-c:a", "aac", "-shortest",
             "-f", "matroska", "-",
         ],
         check=True, capture_output=True,
@@ -670,7 +670,7 @@ def test_mkv_with_no_header_duration_falls_back_to_packet_scan(media_dir):
     assert row["duration"] == pytest.approx(1.0, abs=0.3)
 
 
-def _make_headerless_mkv(path, duration_seconds):
+def _make_headerless_mkv(path, duration_seconds, encoder):
     # Same trick as test_mkv_with_no_header_duration_falls_back_to_packet_scan:
     # piping ffmpeg's matroska output through stdout means the muxer can
     # never seek back to write Segment Duration.
@@ -679,7 +679,7 @@ def _make_headerless_mkv(path, duration_seconds):
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "lavfi", "-i", f"color=c=blue:size=64x64:duration={duration_seconds}",
             "-f", "lavfi", "-i", f"sine=frequency=440:duration={duration_seconds}",
-            "-c:v", "libopenh264", "-c:a", "aac", "-shortest",
+            "-c:v", encoder, "-c:a", "aac", "-shortest",
             "-f", "matroska", "-",
         ],
         check=True, capture_output=True,
@@ -688,14 +688,14 @@ def _make_headerless_mkv(path, duration_seconds):
 
 
 @requires_ffmpeg
-def test_packet_scan_duration_is_cached_and_not_repeated_on_unchanged_rescan(media_dir):
+def test_packet_scan_duration_is_cached_and_not_repeated_on_unchanged_rescan(media_dir, h264_encoder):
     # Regression test: this fallback's cost scales with a file's duration/
     # bitrate (proportionally expensive for a large TV episode), so
     # re-running it on every single rescan of an unchanged file would be
     # a real, size-correlated performance problem -- it must only run once
     # per file, not once per scan.
     mkv_path = media_dir / "featurette.mkv"
-    _make_headerless_mkv(mkv_path, duration_seconds=1)
+    _make_headerless_mkv(mkv_path, duration_seconds=1, encoder=h264_encoder)
 
     call_count = {"n": 0}
     real_fallback = scanner._probe_duration_via_packets
@@ -716,9 +716,9 @@ def test_packet_scan_duration_is_cached_and_not_repeated_on_unchanged_rescan(med
 
 
 @requires_ffmpeg
-def test_packet_scan_duration_reruns_if_file_size_changes(media_dir):
+def test_packet_scan_duration_reruns_if_file_size_changes(media_dir, h264_encoder):
     mkv_path = media_dir / "featurette.mkv"
-    _make_headerless_mkv(mkv_path, duration_seconds=1)
+    _make_headerless_mkv(mkv_path, duration_seconds=1, encoder=h264_encoder)
 
     call_count = {"n": 0}
     real_fallback = scanner._probe_duration_via_packets
@@ -734,7 +734,7 @@ def test_packet_scan_duration_reruns_if_file_size_changes(media_dir):
         # Replace with a different-duration (different-size) render --
         # the cached duration must not be reused across a real content
         # change.
-        _make_headerless_mkv(mkv_path, duration_seconds=3)
+        _make_headerless_mkv(mkv_path, duration_seconds=3, encoder=h264_encoder)
         scanner.scan_media_dirs()
         assert call_count["n"] == 2
 

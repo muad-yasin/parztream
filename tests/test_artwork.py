@@ -80,7 +80,7 @@ def test_get_video_thumbnail_returns_none_when_ffmpeg_cant_read_the_file(tmp_pat
 
 
 @requires_ffmpeg
-def test_get_video_thumbnail_extracts_and_caches_a_real_frame(tmp_path, monkeypatch):
+def test_get_video_thumbnail_extracts_and_caches_a_real_frame(tmp_path, monkeypatch, h264_encoder):
     monkeypatch.setattr(artwork, "CACHE_DIR", tmp_path / "cache")
     video_path = tmp_path / "clip.mp4"
     subprocess.run(
@@ -88,7 +88,7 @@ def test_get_video_thumbnail_extracts_and_caches_a_real_frame(tmp_path, monkeypa
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "lavfi", "-i", "color=c=red:size=64x64:duration=2",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
-            "-c:v", "libx264", "-c:a", "aac", "-shortest",
+            "-c:v", h264_encoder, "-c:a", "aac", "-shortest",
             str(video_path),
         ],
         check=True,

@@ -222,7 +222,7 @@ def test_build_playlist_lists_one_segment_per_chunk_and_ends_the_list():
 
 
 @requires_ffmpeg
-def test_mkv_with_compatible_codecs_gets_remuxed_into_a_playable_segment(tmp_path, monkeypatch):
+def test_mkv_with_compatible_codecs_gets_remuxed_into_a_playable_segment(tmp_path, monkeypatch, h264_encoder):
     monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
 
     mkv_path = tmp_path / "clip.mkv"
@@ -231,7 +231,7 @@ def test_mkv_with_compatible_codecs_gets_remuxed_into_a_playable_segment(tmp_pat
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=1",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
-            "-c:v", "libx264", "-c:a", "aac", "-shortest",
+            "-c:v", h264_encoder, "-c:a", "aac", "-shortest",
             str(mkv_path),
         ],
         check=True,
@@ -257,7 +257,7 @@ def test_mkv_with_compatible_codecs_gets_remuxed_into_a_playable_segment(tmp_pat
 
 
 @requires_ffmpeg
-def test_incompatible_audio_gets_transcoded_while_video_is_copied(tmp_path, monkeypatch):
+def test_incompatible_audio_gets_transcoded_while_video_is_copied(tmp_path, monkeypatch, h264_encoder):
     monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
 
     mkv_path = tmp_path / "clip.mkv"
@@ -266,7 +266,7 @@ def test_incompatible_audio_gets_transcoded_while_video_is_copied(tmp_path, monk
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=1",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
-            "-c:v", "libx264", "-c:a", "ac3", "-shortest",
+            "-c:v", h264_encoder, "-c:a", "ac3", "-shortest",
             str(mkv_path),
         ],
         check=True,
@@ -287,7 +287,7 @@ def test_incompatible_audio_gets_transcoded_while_video_is_copied(tmp_path, monk
 
 
 @requires_ffmpeg
-def test_multichannel_audio_is_downmixed_to_stereo_when_transcoded(tmp_path, monkeypatch):
+def test_multichannel_audio_is_downmixed_to_stereo_when_transcoded(tmp_path, monkeypatch, h264_encoder):
     # Regression test for the real playback bug this fixed: Chromium's
     # MediaSource AAC decoder rejects multichannel (>2 channel) AAC
     # outright (confirmed live against a real browser -- "
@@ -304,7 +304,7 @@ def test_multichannel_audio_is_downmixed_to_stereo_when_transcoded(tmp_path, mon
             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
             "-filter_complex", "[1:a]pan=5.1|FL=c0|FR=c0|FC=c0|LFE=c0|BL=c0|BR=c0[a51]",
             "-map", "0:v", "-map", "[a51]",
-            "-c:v", "libx264", "-c:a", "ac3", "-shortest",
+            "-c:v", h264_encoder, "-c:a", "ac3", "-shortest",
             str(mkv_path),
         ],
         check=True,
@@ -373,7 +373,7 @@ def test_start_job_omits_map_entirely_when_audio_stream_index_unknown(monkeypatc
 
 
 @requires_ffmpeg
-def test_seeking_ahead_of_generated_segments_triggers_a_new_job_from_that_point(tmp_path, monkeypatch):
+def test_seeking_ahead_of_generated_segments_triggers_a_new_job_from_that_point(tmp_path, monkeypatch, h264_encoder):
     monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
 
     mkv_path = tmp_path / "clip.mkv"
@@ -382,7 +382,7 @@ def test_seeking_ahead_of_generated_segments_triggers_a_new_job_from_that_point(
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=30",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=30",
-            "-c:v", "libx264", "-c:a", "aac", "-shortest",
+            "-c:v", h264_encoder, "-c:a", "aac", "-shortest",
             str(mkv_path),
         ],
         check=True,
@@ -398,7 +398,7 @@ def test_seeking_ahead_of_generated_segments_triggers_a_new_job_from_that_point(
 
 
 @requires_ffmpeg
-def test_creating_a_new_segment_prunes_older_ones_once_over_budget(tmp_path, monkeypatch):
+def test_creating_a_new_segment_prunes_older_ones_once_over_budget(tmp_path, monkeypatch, h264_encoder):
     from app import cache as cache_module
 
     cache_dir = tmp_path / "cache"
@@ -412,7 +412,7 @@ def test_creating_a_new_segment_prunes_older_ones_once_over_budget(tmp_path, mon
                 "ffmpeg", "-y", "-loglevel", "error",
                 "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=1",
                 "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
-                "-c:v", "libx264", "-c:a", "aac", "-shortest",
+                "-c:v", h264_encoder, "-c:a", "aac", "-shortest",
                 str(path),
             ],
             check=True,
@@ -691,9 +691,12 @@ def test_stream_copy_jobs_never_touch_the_transcode_semaphore(tmp_path, monkeypa
 
 
 @requires_ffmpeg
-def test_hevc_source_is_transcoded_to_h264_via_software_fallback(tmp_path, monkeypatch):
+def test_hevc_source_is_transcoded_to_h264_via_software_fallback(tmp_path, monkeypatch, h264_encoder):
     monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
-    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "libopenh264")
+    # This one runs a real re-encode, so the pinned encoder must be one
+    # this machine's ffmpeg actually has -- unlike the mocked-Popen tests
+    # elsewhere in this file, where "libopenh264" is just a string.
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: h264_encoder)
 
     hevc_path = tmp_path / "clip.mkv"
     subprocess.run(
@@ -718,9 +721,11 @@ def test_hevc_source_is_transcoded_to_h264_via_software_fallback(tmp_path, monke
 
 
 @requires_ffmpeg
-def test_resolution_cap_applied_during_reencode(tmp_path, monkeypatch):
+def test_resolution_cap_applied_during_reencode(tmp_path, monkeypatch, h264_encoder):
     monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
-    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "libopenh264")
+    # Real re-encode -- see test_hevc_source_is_transcoded_to_h264_via_
+    # software_fallback for why this can't hardcode "libopenh264".
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: h264_encoder)
 
     hevc_path = tmp_path / "clip4k.mkv"
     subprocess.run(

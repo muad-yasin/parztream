@@ -294,7 +294,7 @@ def test_art_endpoint_404s_for_video_with_no_extractable_thumbnail(client, make_
 
 
 @requires_ffmpeg
-def test_art_endpoint_serves_a_real_video_thumbnail(client, make_file):
+def test_art_endpoint_serves_a_real_video_thumbnail(client, make_file, h264_encoder):
     f = make_file("clip.mp4", b"")
     f.unlink()
     subprocess.run(
@@ -302,7 +302,7 @@ def test_art_endpoint_serves_a_real_video_thumbnail(client, make_file):
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "lavfi", "-i", "color=c=green:size=64x64:duration=2",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
-            "-c:v", "libx264", "-c:a", "aac", "-shortest",
+            "-c:v", h264_encoder, "-c:a", "aac", "-shortest",
             str(f),
         ],
         check=True,

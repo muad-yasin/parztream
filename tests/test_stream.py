@@ -287,14 +287,14 @@ def test_hls_segment_endpoint_rejects_malformed_segment_names(client, make_file)
 
 
 @requires_ffmpeg
-def test_mkv_is_remuxed_into_hls_segments_and_served(client, media_dir):
+def test_mkv_is_remuxed_into_hls_segments_and_served(client, media_dir, h264_encoder):
     mkv_path = media_dir / "clip.mkv"
     subprocess.run(
         [
             "ffmpeg", "-y", "-loglevel", "error",
             "-f", "lavfi", "-i", "color=c=blue:size=64x64:duration=1",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
-            "-c:v", "libx264", "-c:a", "aac", "-shortest",
+            "-c:v", h264_encoder, "-c:a", "aac", "-shortest",
             str(mkv_path),
         ],
         check=True,
