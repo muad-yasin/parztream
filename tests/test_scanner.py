@@ -1,3 +1,4 @@
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -35,6 +36,7 @@ def _metadata(**overrides):
         "episode_number": None,
         "is_movie": False,
         "is_extra": False,
+        "segment_boundaries": None,
     }
     base.update(overrides)
     return base
@@ -837,3 +839,81 @@ def test_failed_examples_are_capped_but_failed_count_keeps_counting(make_file):
 
     assert scanner._scan_state["failed_count"] == scanner._MAX_DIAGNOSTIC_EXAMPLES + 5
     assert len(scanner._scan_state["failed_examples"]) == scanner._MAX_DIAGNOSTIC_EXAMPLES
+
+
+def _probe_result(duration=14.0, video_codec="h264", audio_codec="ac3",
+                  width=640, height=480, channels=2, stream_index=0):
+    return (duration, video_codec, audio_codec, width, height, channels, stream_index)
+
+
+def test_scan_stores_segment_boundaries_for_files_that_need_hls(make_file, monkeypatch):
+    make_file("clip.mkv")  # mkv container + h264 -> routes through HLS
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: _probe_result())
+    monkeypatch.setattr(scanner, "probe_keyframes", lambda path: [0.0, 6.0, 12.0])
+
+    scanner.scan_media_dirs()
+
+    row = _rows()[0]
+    assert json.loads(row["segment_boundaries"]) == [0.0, 6.0, 12.0]
+
+
+def test_scan_skips_the_keyframe_probe_for_direct_play_files(make_file, monkeypatch):
+    # The keyframe probe walks every packet -- for an mp4/h264/aac file
+    # that will never touch the HLS path, running it would make scans of a
+    # mostly-compatible library expensive for nothing.
+    make_file("clip.mp4")
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: _probe_result(audio_codec="aac"))
+    probe_calls = []
+    monkeypatch.setattr(scanner, "probe_keyframes", lambda path: probe_calls.append(path) or [0.0])
+
+    scanner.scan_media_dirs()
+
+    assert probe_calls == []
+    assert _rows()[0]["segment_boundaries"] is None
+
+
+def test_boundaries_are_cached_and_not_reprobed_on_unchanged_rescan(make_file, monkeypatch):
+    # Same path+size caching as the packet-scan duration fallback, for the
+    # same reason: both walk every packet of the file.
+    make_file("clip.mkv")
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: _probe_result())
+    probe_calls = []
+
+    def fake_probe(path):
+        probe_calls.append(path)
+        return [0.0, 6.0, 12.0]
+
+    monkeypatch.setattr(scanner, "probe_keyframes", fake_probe)
+
+    scanner.scan_media_dirs()
+    scanner.scan_media_dirs()
+
+    assert len(probe_calls) == 1
+    assert json.loads(_rows()[0]["segment_boundaries"]) == [0.0, 6.0, 12.0]
+
+
+def test_legacy_row_gaining_boundaries_invalidates_its_cached_segments(make_file, monkeypatch):
+    # A row scanned before the segment_boundaries column existed can have
+    # segments cached on the old fixed 6s grid -- once real boundaries are
+    # computed for it, those segments describe different cut points than
+    # the playlist will now advertise and must not survive.
+    from app import transcode
+
+    make_file("clip.mkv")
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: _probe_result())
+    monkeypatch.setattr(scanner, "probe_keyframes", lambda path: [0.0, 6.0, 12.0])
+
+    scanner.scan_media_dirs()
+    row = _rows()[0]
+
+    # Simulate the legacy state: boundaries missing, stale segments cached.
+    with get_connection() as conn:
+        conn.execute("UPDATE media SET segment_boundaries = NULL WHERE id = ?", (row["id"],))
+    stale = transcode.hls_dir_for(row["id"]) / "segment_00000.ts"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes(b"cut on the old fixed grid")
+
+    scanner.scan_media_dirs()
+
+    assert json.loads(_rows()[0]["segment_boundaries"]) == [0.0, 6.0, 12.0]
+    assert not stale.exists()

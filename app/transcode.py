@@ -1,5 +1,6 @@
 import logging
 import math
+import shutil
 import subprocess
 import threading
 import time
@@ -40,11 +41,47 @@ DIRECT_PLAY_CONTAINERS = {".mp4", ".webm"}
 # has no working playback path in this app at all -- see resolve_playable_path.
 TS_SAFE_VIDEO_CODECS = {"h264"}
 
-# Length of each on-demand HLS segment, in seconds. Short enough that a
-# forward seek into not-yet-generated territory only waits a few seconds
-# for one segment (stream-copy is fast), long enough not to spawn an
-# unreasonable number of tiny ffmpeg-adjacent files for a long video.
+# Minimum length of each on-demand HLS segment, in seconds. Short enough
+# that a forward seek into not-yet-generated territory only waits a few
+# seconds for one segment (stream-copy is fast), long enough not to spawn
+# an unreasonable number of tiny ffmpeg-adjacent files for a long video.
+# "Minimum", not "exactly": with -c:v copy, segments can only be cut at the
+# source's keyframes, so real segments run from one keyframe-accurate
+# boundary (see compute_segment_boundaries) to the next -- at least this
+# long, longer when the source's keyframes are sparse.
 SEGMENT_SECONDS = 6
+
+# Padding added to a keyframe-exact -ss value, and subtracted from
+# keyframe-exact -segment_times split points. ffprobe reports keyframe
+# timestamps to microsecond precision, but ffmpeg's own parsing/timebase
+# rescaling of a "-ss 6.006000" argument can round to a timestamp one tick
+# *below* the keyframe's real pts -- and input seeking snaps backward to the
+# nearest keyframe at-or-before the target, so an exact-looking value can
+# land a whole GOP early. Nudging the seek target just past the keyframe
+# (backward snap then lands exactly on it) and the split points just before
+# it (the segment muxer splits at the first keyframe at-or-after a split
+# point) makes both deterministic. 1ms is orders of magnitude larger than
+# the rounding error being guarded against and well under one frame
+# duration even at 120fps (~8.3ms), so it can never skip to a neighboring
+# frame, let alone a neighboring keyframe.
+KEYFRAME_TIME_GUARD = 0.001
+
+# How many _probe_seek_landing calls a single seeked stream-copy job may
+# spend walking down to a boundary it can provably land on (see
+# _resolve_copy_seek) before giving up and starting from the top of the
+# file instead -- which is always correct, just does more (fast,
+# stream-copy) work. Realistic containers resolve in 1-2 probes; only a
+# pathological seek-point layout (e.g. an all-intra file with an index
+# entry on every frame, none of them lining up with boundaries) burns the
+# whole budget.
+SEEK_PROBE_LIMIT = 8
+
+# How close (seconds) a probed seek landing has to be to a stored boundary
+# to count as *being* that boundary. Landings and boundaries both
+# originate from the same packet timestamps, so real matches differ only
+# by container-timebase rounding (mkv stores milliseconds) -- far below
+# this -- while a genuine miss is at least one whole frame away.
+_LANDING_MATCH_TOLERANCE = 0.01
 
 # If a running job's on-disk progress is within this many segments of a
 # requested index, a request just waits for it rather than spawning a
@@ -210,28 +247,132 @@ def hls_dir_for(media_id: int) -> Path:
     return CACHE_DIR / f"{media_id}_hls"
 
 
-def build_playlist(duration: float) -> str:
+def needs_segment_boundaries(path: Path, video_codec, audio_codec, audio_channels) -> bool:
+    """Whether this video would route through the HLS path at all, i.e.
+    whether paying the (packet-walk-priced, see app/scanner.py's
+    probe_keyframes) cost of extracting its keyframe boundaries at scan
+    time is worth anything. Mirrors resolve_playable_path's routing with
+    one deliberate difference: the re-encode branch checks only
+    config.TRANSCODE_ENABLED, never encoder_detect.get_encoder() --
+    encoder detection spawns probing subprocesses and is deliberately lazy
+    (first real transcode request, see app/encoder_detect.py), and a scan
+    must not be the thing that triggers it. Worst case of that shortcut is
+    one wasted keyframe walk for a file that later turns out to have no
+    working encoder anyway. Direct-play files and files with no working
+    HLS route (vp9/av1 in the wrong container, incompatible codec with
+    transcoding off) return False -- boundaries for those would never be
+    read. A file this returns False for that later *does* need them (e.g.
+    the user turns transcoding on) is covered by the lazy backfill in
+    app/routers/stream.py, same as legacy rows."""
+    if video_codec is None:
+        return False
+    video_ok = video_codec.lower() in COMPATIBLE_VIDEO_CODECS
+    audio_ok = audio_codec is None or (
+        audio_codec.lower() in COMPATIBLE_AUDIO_CODECS
+        and (audio_channels is None or audio_channels <= MAX_DIRECT_PLAY_AUDIO_CHANNELS)
+    )
+    container_ok = path.suffix.lower() in DIRECT_PLAY_CONTAINERS
+    if video_ok and audio_ok and container_ok:
+        return False
+    if not video_ok:
+        return config.TRANSCODE_ENABLED
+    return video_codec.lower() in TS_SAFE_VIDEO_CODECS
+
+
+def compute_segment_boundaries(keyframes: list, duration: float):
+    """Turn a video's raw keyframe timestamps (see app/scanner.py's
+    probe_keyframes) into the list of segment start times the playlist and
+    segment jobs both work from -- segment i runs from boundaries[i] to
+    boundaries[i+1] (or to `duration` for the last one). Greedy: walk the
+    keyframes and start a new segment at the first keyframe at least
+    SEGMENT_SECONDS past the previous boundary, so every boundary is an
+    actual keyframe and -c:v copy can cut exactly there. This is the whole
+    fix for the fixed-6s-grid playlist lying about segment durations:
+    stream copy can only cut at keyframes, so pretending segments are
+    exactly 6s long left hls.js placing variable-length segments on a
+    fixed-length timeline, drifting further out of sync every segment.
+
+    Timestamps are normalized so boundaries[0] is always 0.0 -- some
+    containers (MPEG-TS notably) start their timeline at a nonzero pts,
+    but ffmpeg's -ss and the playlist both count from the start of the
+    file, not the stream's raw clock.
+
+    Returns None (caller falls back to the old fixed grid) rather than
+    guessing when there are no keyframes to work from."""
+    if not keyframes:
+        return None
+    origin = keyframes[0]
+    boundaries = [0.0]
+    for kf in keyframes:
+        rel = kf - origin
+        # A boundary this close to the end would make the final segment a
+        # sliver (or, if duration is slightly under-reported, empty) --
+        # fold that tail into the previous segment instead.
+        if rel >= duration - 1.0:
+            break
+        if rel - boundaries[-1] >= SEGMENT_SECONDS:
+            boundaries.append(rel)
+    return boundaries
+
+
+def invalidate_segments(media_id: int):
+    """Delete every cached HLS segment for this media, stopping any job
+    still writing into its directory first. Called when segment boundaries
+    are first computed (or change) for a file -- segments cut on the old
+    fixed 6s grid don't line up with a boundary-derived playlist, so
+    serving a stale one would splice mismatched content into the stream."""
+    hls_dir = hls_dir_for(media_id)
+    with _jobs_guard:
+        _terminate_stale_jobs(hls_dir)
+        _jobs.pop(hls_dir, None)
+    shutil.rmtree(hls_dir, ignore_errors=True)
+
+
+def build_playlist(duration: float, boundaries: list = None) -> str:
     """A complete, static VOD playlist computed once from the file's known
-    duration (from ffprobe at scan time) -- not ffmpeg's own growing "event"
-    playlist. Since the total duration is already known upfront, there's no
-    need for live-playlist semantics: every segment index is listed
-    immediately, and each segment's actual bytes are generated on demand
-    (see ensure_segment) whenever a player first requests it, whether that's
-    sequential playback or a seek."""
-    total_segments = max(1, math.ceil(duration / SEGMENT_SECONDS))
+    duration and keyframe-derived segment boundaries (both from ffprobe, see
+    app/scanner.py) -- not ffmpeg's own growing "event" playlist. Since the
+    total duration is already known upfront, there's no need for
+    live-playlist semantics: every segment index is listed immediately, and
+    each segment's actual bytes are generated on demand (see ensure_segment)
+    whenever a player first requests it, whether that's sequential playback
+    or a seek.
+
+    Each EXTINF is the real distance between consecutive boundaries (the
+    exact points ensure_segment's jobs cut at), so hls.js's timeline matches
+    the bytes it actually receives -- the mismatch between a fixed-6s-grid
+    playlist and keyframe-cut segments was the root cause of stutter and
+    progressive A/V desync. boundaries=None keeps the old fixed-grid
+    playlist as a degraded fallback for the rare file whose keyframes
+    couldn't be probed at all (see app/routers/stream.py's backfill)."""
     lines = [
         "#EXTM3U",
         "#EXT-X-VERSION:3",
-        f"#EXT-X-TARGETDURATION:{SEGMENT_SECONDS}",
         "#EXT-X-PLAYLIST-TYPE:VOD",
         "#EXT-X-MEDIA-SEQUENCE:0",
     ]
-    remaining = duration
-    for i in range(total_segments):
-        seg_len = min(SEGMENT_SECONDS, remaining) if remaining > 0 else SEGMENT_SECONDS
+    if boundaries:
+        seg_lengths = [
+            end - start for start, end in zip(boundaries, boundaries[1:] + [duration])
+        ]
+        # duration and the last boundary both come from ffprobe, but via
+        # different probes -- clamp so a slightly-short duration can never
+        # produce a zero/negative final EXTINF.
+        seg_lengths[-1] = max(seg_lengths[-1], 0.1)
+        # TARGETDURATION must be >= every real segment length, or players
+        # legitimately mistrust the playlist (it's a spec MUST).
+        lines.insert(1, f"#EXT-X-TARGETDURATION:{math.ceil(max(seg_lengths))}")
+    else:
+        lines.insert(1, f"#EXT-X-TARGETDURATION:{SEGMENT_SECONDS}")
+        total_segments = max(1, math.ceil(duration / SEGMENT_SECONDS))
+        remaining = duration
+        seg_lengths = []
+        for _ in range(total_segments):
+            seg_lengths.append(min(SEGMENT_SECONDS, remaining) if remaining > 0 else SEGMENT_SECONDS)
+            remaining -= SEGMENT_SECONDS
+    for i, seg_len in enumerate(seg_lengths):
         lines.append(f"#EXTINF:{seg_len:.3f},")
         lines.append(f"segment_{i:05d}.ts")
-        remaining -= SEGMENT_SECONDS
     lines.append("#EXT-X-ENDLIST")
     return "\n".join(lines) + "\n"
 
@@ -352,7 +493,7 @@ def _highest_contiguous_segment(hls_dir: Path, start: int) -> int:
 def ensure_segment(
     media_id: int, src_path: Path, remux_audio: bool, index: int,
     reencode_video: bool = False, video_width=None, video_height=None,
-    audio_stream_index=None,
+    audio_stream_index=None, boundaries: list = None,
 ) -> Path:
     """Block until segment `index` is fully written to disk for this media
     (starting or reusing an ffmpeg job that produces it), then return its
@@ -364,14 +505,23 @@ def ensure_segment(
     app/scanner.py's _choose_audio_stream) is passed through to _start_job
     so the track actually served is guaranteed to be the same one
     resolve_playable_path validated -- not whatever ffmpeg's own default
-    stream-selection heuristic would otherwise pick."""
+    stream-selection heuristic would otherwise pick. boundaries (see
+    compute_segment_boundaries) maps `index` to its exact keyframe start
+    time -- any two jobs asked for "segment N" therefore cut identical
+    content, unlike the old fixed-grid seek where -ss snapped to whatever
+    keyframe was nearest N*6s. None falls back to the old fixed grid."""
+    if boundaries is not None and index >= len(boundaries):
+        # The playlist lists exactly len(boundaries) segments, so this is a
+        # request for something that can never exist -- fail it before
+        # spawning an ffmpeg job seeked past the end of the file.
+        raise FileNotFoundError(f"segment {index} is past the end of the playlist")
     hls_dir = hls_dir_for(media_id)
     hls_dir.mkdir(parents=True, exist_ok=True)
     target = _segment_path(hls_dir, index)
 
     job = _find_or_start_job(
         hls_dir, src_path, remux_audio, index, reencode_video, video_width, video_height,
-        audio_stream_index,
+        audio_stream_index, boundaries,
     )
     if job is None:
         # No active job could still be writing this file -- either a past
@@ -408,7 +558,7 @@ def ensure_segment(
 def _find_or_start_job(
     hls_dir: Path, src_path: Path, remux_audio: bool, index: int,
     reencode_video: bool = False, video_width=None, video_height=None,
-    audio_stream_index=None,
+    audio_stream_index=None, boundaries: list = None,
 ):
     """Returns the _Job that will (eventually) produce `index`, or None if
     the segment is already complete on disk with no active job that could
@@ -425,7 +575,7 @@ def _find_or_start_job(
                 _terminate_stale_jobs(hls_dir)
                 job = _start_job(
                     hls_dir, src_path, remux_audio, index, False, video_width, video_height,
-                    audio_stream_index,
+                    audio_stream_index, boundaries,
                 )
                 _jobs[hls_dir].append(job)
                 return job
@@ -448,7 +598,7 @@ def _find_or_start_job(
             try:
                 job = _start_job(
                     hls_dir, src_path, remux_audio, index, True, video_width, video_height,
-                    audio_stream_index,
+                    audio_stream_index, boundaries,
                 )
             except Exception:
                 # _start_job can fail before ever spawning a process (see
@@ -481,10 +631,109 @@ def _check_jobs_locked(hls_dir: Path, index: int):
     return _NEED_NEW_JOB
 
 
+def _probe_seek_landing(src_path: Path, seconds: float):
+    """The raw source-clock pts of the first video packet ffmpeg actually
+    emits for `-ss <seconds> -i <src> -c:v copy` on THIS machine, or None
+    if that couldn't be determined. This is the ground truth a seeked
+    stream-copy job's construction has to be built on, because `-ss` does
+    NOT reliably land on the keyframe at-or-before the requested time:
+    confirmed live, ffmpeg's CLI subtracts an internal ~0.13s "dts
+    heuristic" (3*AV_TIME_BASE/23) from the requested seek target whenever
+    the video stream has B-frame reordering and the demuxer doesn't seek
+    by pts -- true for mkv, the single most common container routed
+    through this module -- so a seek aimed just past a keyframe snaps to
+    the *previous* seek point instead. mp4-family inputs are exempt (their
+    demuxer seeks by pts, so the heuristic is skipped and landings are
+    exact). Rather than replicating that version-dependent constant, this
+    asks the same ffmpeg binary the job will run to do the same seek and
+    read out where it landed: one packet through -f framecrc, which
+    prints "stream, dts, pts, ..." lines in stream-timebase units --
+    demux-only, no decode, tens of milliseconds even on large files."""
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-v", "error",
+                "-ss", f"{max(seconds, 0.0):.6f}", "-i", str(src_path),
+                "-map", "0:v:0", "-c:v", "copy", "-copyts",
+                "-frames:v", "1", "-f", "framecrc", "-",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+
+    timebase = None
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("#tb 0:"):
+            numerator, _, denominator = line.split()[-1].partition("/")
+            try:
+                timebase = int(numerator) / int(denominator)
+            except (ValueError, ZeroDivisionError):
+                return None
+        elif line and not line.startswith("#"):
+            parts = [p.strip() for p in line.split(",")]
+            if timebase is None or len(parts) < 3:
+                return None
+            try:
+                return float(parts[2]) * timebase  # stream, dts, PTS, ...
+            except ValueError:
+                return None
+    return None
+
+
+def _resolve_copy_seek(src_path: Path, boundaries: list, start_index: int):
+    """Find a seek target for a stream-copy job that provably lands the
+    demuxer on a segment boundary, by probing where candidate targets
+    actually land (see _probe_seek_landing) instead of assuming. Returns
+    (effective_start_index, seek_target_seconds_or_None) -- the job then
+    starts at that (possibly earlier) boundary, regenerating a few real
+    segments on its way to the requested one, which stream-copy chews
+    through far faster than real time. seek_target None means "start from
+    the top of the file, no -ss at all", which is always exact by
+    definition. Returns None if probing itself failed (no ffmpeg, weird
+    file) -- the caller falls back to trusting the requested target, which
+    is what this module did before the probe existed and is exact for
+    mp4-family sources.
+
+    The walk: probe the wanted boundary's target; if the landing IS a
+    boundary (any boundary -- earlier is fine), done. Otherwise re-aim at
+    the landing itself and probe again; each landing is strictly earlier,
+    so this terminates, and SEEK_PROBE_LIMIT caps the pathological case.
+    A landing at/before the first boundary just means "start from 0"."""
+    origin = _probe_seek_landing(src_path, 0.0)
+    if origin is None:
+        return None
+
+    # Boundaries are stored file-relative (normalized to the first
+    # keyframe, see compute_segment_boundaries); probes speak the raw
+    # source clock, which for some containers (MPEG-TS notably) starts
+    # past zero -- `origin` converts between the two.
+    target = boundaries[start_index] + origin + KEYFRAME_TIME_GUARD
+    for _ in range(SEEK_PROBE_LIMIT):
+        landing = _probe_seek_landing(src_path, target)
+        if landing is None:
+            return None
+        rel = landing - origin
+        if rel <= boundaries[0] + _LANDING_MATCH_TOLERANCE:
+            return 0, None
+        matched = None
+        for i, boundary in enumerate(boundaries):
+            if abs(boundary - rel) <= _LANDING_MATCH_TOLERANCE:
+                matched = i
+                break
+        if matched is not None:
+            # The job re-runs this exact seek: same binary, same file,
+            # same target -- same landing.
+            return matched, target
+        target = landing + KEYFRAME_TIME_GUARD
+    return 0, None
+
+
 def _start_job(
     hls_dir: Path, src_path: Path, remux_audio: bool, start_index: int,
     reencode_video: bool = False, video_width=None, video_height=None,
-    audio_stream_index=None,
+    audio_stream_index=None, boundaries: list = None,
 ) -> "_Job":
     """Caller is responsible for holding a transcode-semaphore slot already
     (see _find_or_start_job) when reencode_video is True -- this function
@@ -496,8 +745,83 @@ def _start_job(
     # multichannel AAC track that's valid per ffprobe but unplayable in a
     # real browser. A no-op for a source that's already stereo/mono.
     audio_args = ["-c:a", "aac", "-ac", "2"] if remux_audio else ["-c:a", "copy"]
-    seek_args = ["-ss", str(start_index * SEGMENT_SECONDS)] if start_index else []
     segment_pattern = str(hls_dir / "segment_%05d.ts")
+
+    effective_index = start_index
+    copyts_args = []
+    if boundaries is not None:
+        # Keyframe-accurate cutting: start the job at a stored boundary and
+        # split at every subsequent one, so the segments this job writes
+        # match build_playlist's EXTINF values exactly. The segment muxer
+        # measures -segment_times against the first packet it receives
+        # (confirmed empirically -- neither -copyts absolute times nor
+        # times relative to the *requested* -ss align if the demuxer lands
+        # anywhere other than assumed), so everything below is anchored to
+        # where the seek provably lands, not to where it was aimed.
+        # KEYFRAME_TIME_GUARD (see its comment) keeps float/timebase
+        # rounding from snapping the seek to the previous keyframe or a
+        # split to the next one.
+        if start_index and not reencode_video:
+            resolved = _resolve_copy_seek(src_path, boundaries, start_index)
+            if resolved is not None:
+                # Anchor the job to the probed landing: it may be an
+                # earlier boundary than requested (mkv seeks land short,
+                # see _probe_seek_landing), in which case the job starts
+                # there and regenerates a few real segments on the way.
+                # -noaccurate_seek keeps a transcoded audio track aligned
+                # with the copied video: accurate_seek would decode-drop
+                # audio up to the *requested* time while copied video
+                # packets flow from the *landing*, leaving the first
+                # segments silent. -copyts pins the timeline the split
+                # times are measured on (no avoid_negative_ts shifting,
+                # whose first-dts normalization is only accurate to within
+                # a B-frame reorder delay).
+                effective_index, seek_target = resolved
+                if seek_target is not None:
+                    seek_args = ["-noaccurate_seek", "-ss", f"{seek_target:.6f}"]
+                else:
+                    seek_args = []
+                copyts_args = ["-copyts"]
+                reference = boundaries[effective_index]
+            else:
+                # Probing unavailable (no ffmpeg? unreadable file?) --
+                # trust the requested target the way this module did
+                # before the probe existed. Exact for mp4-family sources;
+                # the job spawn below would fail loudly anyway if ffmpeg
+                # is genuinely gone.
+                seek_args = ["-ss", f"{boundaries[start_index] + KEYFRAME_TIME_GUARD:.6f}"]
+                reference = boundaries[start_index] + KEYFRAME_TIME_GUARD
+        elif start_index:
+            # Re-encode: the video is decoded, so default accurate_seek
+            # drops decoded frames up to the requested time -- output is
+            # frame-exact at the boundary regardless of where the demuxer
+            # landed, no probing needed.
+            seek_args = ["-ss", f"{boundaries[start_index] + KEYFRAME_TIME_GUARD:.6f}"]
+            reference = boundaries[start_index] + KEYFRAME_TIME_GUARD
+        else:
+            seek_args = []
+            reference = 0.0
+
+        split_times = [
+            f"{b - reference - KEYFRAME_TIME_GUARD:.6f}"
+            for b in boundaries[effective_index + 1:]
+        ]
+        if split_times:
+            segment_muxer_args = ["-segment_times", ",".join(split_times)]
+        else:
+            # Job starts at the final segment: nothing left to split at,
+            # but the muxer's default segment_time is 2s, so an explicit
+            # never-reached value is needed to keep the remainder as one
+            # segment.
+            segment_muxer_args = ["-segment_time", "999999"]
+    else:
+        # Fixed-grid fallback for a file whose keyframes couldn't be probed
+        # (see build_playlist) -- the original behavior, kept degraded
+        # rather than removed: -ss snaps to whichever keyframe is nearest
+        # the grid position, and real segment lengths won't match the
+        # playlist's claimed 6s, but it still plays after a fashion.
+        seek_args = ["-ss", str(start_index * SEGMENT_SECONDS)] if start_index else []
+        segment_muxer_args = ["-segment_time", str(SEGMENT_SECONDS)]
 
     # Explicit -map: without this, ffmpeg falls back to its own default
     # stream-selection heuristic (for audio, not simply "first" -- it
@@ -516,6 +840,21 @@ def _start_job(
     map_args = []
     if audio_stream_index is not None:
         map_args = ["-map", "0:v:0", "-map", f"0:a:{audio_stream_index}"]
+
+    # For a re-encode, the encoder places keyframes wherever its own GOP
+    # logic likes -- forcing one at every boundary guarantees each output
+    # segment still starts with an IDR frame (a decodable entry point, which
+    # is what makes seeking to any segment work), exactly like the
+    # stream-copy path gets for free by cutting at source keyframes. Same
+    # relative-to-seek-origin times as the split points, minus the guard:
+    # the forced keyframe must land at-or-after its split point so it's the
+    # frame the muxer actually cuts on.
+    force_keyframe_args = []
+    if reencode_video and boundaries is not None and boundaries[start_index + 1:]:
+        force_keyframe_args = [
+            "-force_key_frames",
+            ",".join(f"{b - reference:.6f}" for b in boundaries[start_index + 1:]),
+        ]
 
     pre_input_args = []
     if reencode_video:
@@ -550,17 +889,24 @@ def _start_job(
         *seek_args,
         "-i", str(src_path),
         *map_args,
-        *video_args, *audio_args,
+        *video_args, *force_keyframe_args, *audio_args, *copyts_args,
         "-f", "segment",
-        "-segment_time", str(SEGMENT_SECONDS),
-        "-segment_start_number", str(start_index),
+        *segment_muxer_args,
+        "-segment_start_number", str(effective_index),
+        # Kept deliberately now that EXTINF values are keyframe-accurate:
+        # every segment starting at pts 0 means hls.js places segments
+        # purely by the playlist's (now truthful) durations, and two jobs
+        # producing the same index emit identical timestamps regardless of
+        # where each was seeked from. Continuous source timestamps would
+        # add nothing -- the playlist is already the single source of truth
+        # for the timeline.
         "-reset_timestamps", "1",
         segment_pattern,
     ]
     process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     with _all_processes_guard:
         _all_processes.add(process)
-    job = _Job(process, start_index, reencode_video)
+    job = _Job(process, effective_index, reencode_video)
     threading.Thread(target=_watch_job, args=(job, hls_dir), daemon=True).start()
     return job
 

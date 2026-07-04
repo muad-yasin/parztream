@@ -210,6 +210,8 @@ def test_h264_in_wrong_container_still_gets_the_working_ts_remux(tmp_path):
 
 
 def test_build_playlist_lists_one_segment_per_chunk_and_ends_the_list():
+    # No boundaries -- the fixed-grid fallback for a file whose keyframes
+    # couldn't be probed, kept behaving exactly as it always has.
     playlist = transcode.build_playlist(duration=14.0)
 
     assert "#EXTM3U" in playlist
@@ -219,6 +221,488 @@ def test_build_playlist_lists_one_segment_per_chunk_and_ends_the_list():
     assert "segment_00001.ts" in playlist
     assert "segment_00002.ts" in playlist
     assert "segment_00003.ts" not in playlist
+
+
+def _extinf_values(playlist: str):
+    return [
+        float(line[len("#EXTINF:"):].rstrip(","))
+        for line in playlist.splitlines() if line.startswith("#EXTINF:")
+    ]
+
+
+def test_compute_segment_boundaries_picks_first_keyframe_past_each_minimum():
+    # Keyframes every 2s: boundaries land on the first keyframe at least
+    # SEGMENT_SECONDS past the previous boundary. The 28s keyframe is only
+    # 4s past the last boundary, so the tail folds into the final segment.
+    keyframes = [float(t) for t in range(0, 30, 2)]
+
+    boundaries = transcode.compute_segment_boundaries(keyframes, duration=30.0)
+
+    assert boundaries == [0.0, 6.0, 12.0, 18.0, 24.0]
+
+
+def test_compute_segment_boundaries_reflects_sparse_keyframes():
+    # A 10s keyframe interval (sparse GOPs, common in high-quality rips):
+    # segments come out 10s long because that's where cuts are physically
+    # possible with -c:v copy -- the playlist must say so, not claim 6s.
+    keyframes = [0.0, 10.0, 20.0, 30.0]
+
+    boundaries = transcode.compute_segment_boundaries(keyframes, duration=40.0)
+
+    assert boundaries == [0.0, 10.0, 20.0, 30.0]
+
+
+def test_compute_segment_boundaries_normalizes_a_nonzero_start_clock():
+    # MPEG-TS sources often start their timeline at a nonzero pts -- -ss
+    # and the playlist both count from the start of the file, so boundaries
+    # must be rebased to keyframes[0].
+    keyframes = [1.4, 7.4, 13.4]
+
+    boundaries = transcode.compute_segment_boundaries(keyframes, duration=18.0)
+
+    assert boundaries == [0.0, 6.0, 12.0]
+
+
+def test_compute_segment_boundaries_never_leaves_a_sliver_final_segment():
+    # A keyframe right at the end must not become a boundary -- the final
+    # "segment" would be a sub-second sliver (or empty if duration is
+    # slightly under-reported).
+    keyframes = [0.0, 6.0, 11.7]
+
+    boundaries = transcode.compute_segment_boundaries(keyframes, duration=12.0)
+
+    assert boundaries == [0.0, 6.0]
+
+
+def test_compute_segment_boundaries_returns_none_without_keyframes():
+    assert transcode.compute_segment_boundaries([], duration=30.0) is None
+    assert transcode.compute_segment_boundaries(None, duration=30.0) is None
+
+
+def test_build_playlist_extinf_values_match_the_boundaries():
+    boundaries = [0.0, 6.5, 14.2, 20.2]
+
+    playlist = transcode.build_playlist(duration=23.0, boundaries=boundaries)
+
+    values = _extinf_values(playlist)
+    assert values == pytest.approx([6.5, 7.7, 6.0, 2.8], abs=0.001)
+    # TARGETDURATION is a spec MUST: >= every real segment duration, so the
+    # 7.7s segment forces 8, not the old hardcoded SEGMENT_SECONDS.
+    assert "#EXT-X-TARGETDURATION:8" in playlist
+    assert "segment_00003.ts" in playlist
+    assert "segment_00004.ts" not in playlist
+
+
+def test_build_playlist_clamps_final_segment_when_duration_disagrees():
+    # duration and the last boundary come from different ffprobe calls -- a
+    # slightly-short duration must never produce a zero/negative EXTINF.
+    playlist = transcode.build_playlist(duration=11.9, boundaries=[0.0, 6.0, 12.0])
+
+    assert all(v > 0 for v in _extinf_values(playlist))
+
+
+def _fake_landings(monkeypatch, landings):
+    """Replace the real (subprocess-spawning) seek-landing probe with a
+    fixed target->landing map, recording every probed target. `landings`
+    maps a rounded target to where the fake demuxer 'lands'; a callable
+    value is applied to the target."""
+    probed = []
+
+    def fake_probe(src_path, seconds):
+        probed.append(round(seconds, 3))
+        value = landings.get(round(seconds, 3), landings.get("default"))
+        return value(seconds) if callable(value) else value
+
+    monkeypatch.setattr(transcode, "_probe_seek_landing", fake_probe)
+    return probed
+
+
+def test_start_job_with_boundaries_cuts_at_the_stored_times(monkeypatch):
+    captured_cmd = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        return _FakeProcess(lambda: (b"", b"", 0))
+
+    boundaries = [0.0, 6.5, 14.2, 20.2]
+    # The demuxer lands exactly where aimed (the mp4-family case).
+    _fake_landings(monkeypatch, {0.0: 0.0, 6.501: 6.5})
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        transcode._start_job(
+            Path("/tmp/some_hls_dir"), Path("/media/clip.mkv"), remux_audio=False,
+            start_index=1, boundaries=boundaries,
+        )
+
+    cmd = captured_cmd["cmd"]
+    # Seeks to the segment's exact stored boundary (plus the rounding
+    # guard), never to a fixed start_index * 6s grid position.
+    assert float(cmd[cmd.index("-ss") + 1]) == pytest.approx(
+        6.5 + transcode.KEYFRAME_TIME_GUARD, abs=1e-6
+    )
+    # The split times are measured by the muxer from the first packet (the
+    # landing), and audio must flow from the landing too, on a pinned
+    # timeline -- see _start_job.
+    assert "-noaccurate_seek" in cmd
+    assert "-copyts" in cmd
+    assert cmd[cmd.index("-segment_start_number") + 1] == "1"
+    assert "-segment_time" not in cmd
+    split_values = [float(v) for v in cmd[cmd.index("-segment_times") + 1].split(",")]
+    expected = [
+        14.2 - 6.5 - transcode.KEYFRAME_TIME_GUARD,
+        20.2 - 6.5 - transcode.KEYFRAME_TIME_GUARD,
+    ]
+    assert split_values == pytest.approx(expected, abs=1e-6)
+
+
+def test_start_job_seek_landing_short_starts_at_the_landed_boundary(monkeypatch):
+    # Regression test for a confirmed live bug: on mkv, ffmpeg's -ss lands
+    # ~0.13s short of the requested time (its internal dts heuristic), so
+    # a seek aimed at boundary 22.0 landed on the *previous* seek point --
+    # and split times computed against 22.0 then cut every segment in the
+    # wrong place (a 15s segment where the playlist promised 8s). The job
+    # must anchor to where the seek provably lands: same -ss target, but
+    # numbering/splits from the landed boundary.
+    captured_cmd = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        return _FakeProcess(lambda: (b"", b"", 0))
+
+    boundaries = [0.0, 9.0, 15.0, 22.0, 30.0, 37.0]
+    _fake_landings(monkeypatch, {0.0: 0.0, 22.001: 15.0})
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        job = transcode._start_job(
+            Path("/tmp/some_hls_dir"), Path("/media/clip.mkv"), remux_audio=False,
+            start_index=3, boundaries=boundaries,
+        )
+
+    cmd = captured_cmd["cmd"]
+    assert float(cmd[cmd.index("-ss") + 1]) == pytest.approx(22.001, abs=1e-6)
+    assert cmd[cmd.index("-segment_start_number") + 1] == "2"
+    assert job.start_index == 2  # coverage bookkeeping must match the files
+    split_values = [float(v) for v in cmd[cmd.index("-segment_times") + 1].split(",")]
+    guard = transcode.KEYFRAME_TIME_GUARD
+    assert split_values == pytest.approx([22.0 - 15.0 - guard, 30.0 - 15.0 - guard, 37.0 - 15.0 - guard], abs=1e-6)
+
+
+def test_start_job_walks_down_when_the_landing_is_not_a_boundary(monkeypatch):
+    # A landing on a non-boundary keyframe can't start a job (the first
+    # file written must begin exactly at its own boundary) -- re-aim at
+    # the landing and probe again until one IS a boundary.
+    captured_cmd = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        return _FakeProcess(lambda: (b"", b"", 0))
+
+    boundaries = [0.0, 9.0, 15.0, 22.0, 30.0, 37.0]
+    probed = _fake_landings(monkeypatch, {0.0: 0.0, 22.001: 17.0, 17.001: 15.0})
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        transcode._start_job(
+            Path("/tmp/some_hls_dir"), Path("/media/clip.mkv"), remux_audio=False,
+            start_index=3, boundaries=boundaries,
+        )
+
+    cmd = captured_cmd["cmd"]
+    assert probed == [0.0, 22.001, 17.001]
+    assert float(cmd[cmd.index("-ss") + 1]) == pytest.approx(17.001, abs=1e-6)
+    assert cmd[cmd.index("-segment_start_number") + 1] == "2"
+
+
+def test_start_job_gives_up_walking_and_starts_from_zero(monkeypatch):
+    # Pathological seek-point layout: no probe ever lands on a boundary.
+    # Starting from the top of the file is slower but always correct.
+    captured_cmd = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        return _FakeProcess(lambda: (b"", b"", 0))
+
+    boundaries = [0.0, 9.0, 15.0, 22.0, 30.0, 37.0]
+    _fake_landings(monkeypatch, {0.0: 0.0, "default": lambda t: t - 1.5})
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        transcode._start_job(
+            Path("/tmp/some_hls_dir"), Path("/media/clip.mkv"), remux_audio=False,
+            start_index=3, boundaries=boundaries,
+        )
+
+    cmd = captured_cmd["cmd"]
+    assert "-ss" not in cmd
+    assert cmd[cmd.index("-segment_start_number") + 1] == "0"
+    split_values = [float(v) for v in cmd[cmd.index("-segment_times") + 1].split(",")]
+    assert len(split_values) == len(boundaries) - 1
+
+
+def test_start_job_probe_failure_falls_back_to_trusting_the_target(monkeypatch):
+    # No ffmpeg / unreadable file: behave exactly as before the probe
+    # existed (exact for mp4-family sources) rather than failing the job
+    # before it even spawns.
+    captured_cmd = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        return _FakeProcess(lambda: (b"", b"", 0))
+
+    boundaries = [0.0, 9.0, 15.0, 22.0, 30.0, 37.0]
+    monkeypatch.setattr(transcode, "_probe_seek_landing", lambda *a: None)
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        transcode._start_job(
+            Path("/tmp/some_hls_dir"), Path("/media/clip.mkv"), remux_audio=False,
+            start_index=3, boundaries=boundaries,
+        )
+
+    cmd = captured_cmd["cmd"]
+    assert float(cmd[cmd.index("-ss") + 1]) == pytest.approx(22.001, abs=1e-6)
+    assert "-copyts" not in cmd
+    assert cmd[cmd.index("-segment_start_number") + 1] == "3"
+    split_values = [float(v) for v in cmd[cmd.index("-segment_times") + 1].split(",")]
+    guard = transcode.KEYFRAME_TIME_GUARD
+    assert split_values == pytest.approx([30.0 - 22.0 - 2 * guard, 37.0 - 22.0 - 2 * guard], abs=1e-6)
+
+
+def test_seeked_reencode_job_never_probes_the_demuxer_landing(monkeypatch):
+    # Re-encode decodes the video, so accurate_seek already makes output
+    # frame-exact at the requested boundary -- probing would be wasted
+    # subprocesses on the path that can least afford extra latency.
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "libopenh264")
+
+    def exploding_probe(*args):
+        raise AssertionError("re-encode jobs must not probe seek landings")
+
+    monkeypatch.setattr(transcode, "_probe_seek_landing", exploding_probe)
+    captured_cmd = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        return _FakeProcess(lambda: (b"", b"", 0))
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        transcode._start_job(
+            Path("/tmp/some_hls_dir"), Path("/media/clip.mkv"), remux_audio=False,
+            start_index=2, reencode_video=True, boundaries=[0.0, 6.0, 12.0, 18.0],
+        )
+
+    cmd = captured_cmd["cmd"]
+    assert float(cmd[cmd.index("-ss") + 1]) == pytest.approx(12.001, abs=1e-6)
+    assert "-copyts" not in cmd
+    assert cmd[cmd.index("-segment_start_number") + 1] == "2"
+
+
+def test_start_job_for_the_final_segment_never_splits_again(monkeypatch):
+    captured_cmd = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        return _FakeProcess(lambda: (b"", b"", 0))
+
+    _fake_landings(monkeypatch, {0.0: 0.0, 12.001: 12.0})
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        transcode._start_job(
+            Path("/tmp/some_hls_dir"), Path("/media/clip.mkv"), remux_audio=False,
+            start_index=2, boundaries=[0.0, 6.0, 12.0],
+        )
+
+    cmd = captured_cmd["cmd"]
+    assert "-segment_times" not in cmd
+    # Without an explicit value the segment muxer's default is 2s -- the
+    # remainder must stay one single segment.
+    assert float(cmd[cmd.index("-segment_time") + 1]) > 10_000
+
+
+def test_start_job_without_boundaries_keeps_the_fixed_grid(monkeypatch):
+    captured_cmd = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        return _FakeProcess(lambda: (b"", b"", 0))
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        transcode._start_job(
+            Path("/tmp/some_hls_dir"), Path("/media/clip.mkv"), remux_audio=False,
+            start_index=3, boundaries=None,
+        )
+
+    cmd = captured_cmd["cmd"]
+    assert cmd[cmd.index("-ss") + 1] == str(3 * transcode.SEGMENT_SECONDS)
+    assert cmd[cmd.index("-segment_time") + 1] == str(transcode.SEGMENT_SECONDS)
+
+
+def test_reencode_job_forces_keyframes_at_every_boundary(monkeypatch):
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "libopenh264")
+    captured_cmd = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        return _FakeProcess(lambda: (b"", b"", 0))
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        transcode._start_job(
+            Path("/tmp/some_hls_dir"), Path("/media/clip.mkv"), remux_audio=False,
+            start_index=0, reencode_video=True, boundaries=[0.0, 6.0, 12.5],
+        )
+
+    cmd = captured_cmd["cmd"]
+    forced = [float(v) for v in cmd[cmd.index("-force_key_frames") + 1].split(",")]
+    # The encoder must emit an IDR frame exactly where the muxer will cut,
+    # so every re-encoded segment starts decodable -- stream copy gets this
+    # for free from the source's own keyframes, a re-encode has to ask.
+    assert forced == pytest.approx([6.0, 12.5], abs=1e-6)
+
+
+def test_segment_request_past_the_playlist_end_fails_without_spawning_ffmpeg(tmp_path, monkeypatch):
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"source bytes")
+
+    with patch("subprocess.Popen") as mock_popen:
+        with pytest.raises(FileNotFoundError):
+            transcode.ensure_segment(
+                125, f, remux_audio=False, index=3, boundaries=[0.0, 6.0, 12.0],
+            )
+    mock_popen.assert_not_called()
+
+
+def test_invalidate_segments_removes_cached_segments_and_stops_jobs(tmp_path, monkeypatch):
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"source bytes")
+    hls_dir = transcode.hls_dir_for(601)
+
+    created = []
+
+    def fake_popen(cmd, **kwargs):
+        p = _TerminableFakeProcess()
+        created.append(p)
+        return p
+
+    try:
+        with patch("subprocess.Popen", side_effect=fake_popen):
+            transcode._find_or_start_job(hls_dir, f, False, 0)
+        stale = hls_dir / "segment_00000.ts"
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_bytes(b"cut on the old fixed grid")
+
+        transcode.invalidate_segments(601)
+
+        assert not stale.exists()
+        assert created[0].terminate_called.is_set()
+    finally:
+        for p in created:
+            p.terminate()
+
+
+@requires_ffmpeg
+def test_boundary_cut_segments_really_match_the_playlist_durations(tmp_path, monkeypatch, h264_encoder):
+    # End-to-end through real ffmpeg: probe real keyframes, compute
+    # boundaries, cut a segment, and confirm its actual duration is the
+    # same number the playlist advertises for it -- the exact property
+    # whose violation (fixed-grid EXTINF vs. keyframe-cut segments) caused
+    # the stutter/desync this design fixed.
+    from app import scanner
+
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+    mkv_path = tmp_path / "clip.mkv"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc=size=64x64:rate=25:duration=14",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=14",
+            # Keyframe every 2s so boundaries land on a real 6s cadence --
+            # a lavfi still image otherwise gets exactly one keyframe.
+            "-force_key_frames", "expr:gte(t,n_forced*2)",
+            "-c:v", h264_encoder, "-c:a", "aac", "-shortest",
+            str(mkv_path),
+        ],
+        check=True,
+    )
+
+    keyframes = scanner.probe_keyframes(mkv_path)
+    assert keyframes, "keyframe probe found nothing in a freshly-encoded file"
+    boundaries = transcode.compute_segment_boundaries(keyframes, duration=14.0)
+    assert boundaries is not None and len(boundaries) >= 2
+    assert boundaries[0] == 0.0
+
+    segment = transcode.ensure_segment(
+        603, mkv_path, remux_audio=False, index=0, boundaries=boundaries,
+    )
+
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "csv=p=0", str(segment),
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    actual = float(probe.stdout.strip())
+    advertised = _extinf_values(transcode.build_playlist(14.0, boundaries))[0]
+    assert actual == pytest.approx(advertised, abs=0.3)
+
+
+@requires_ffmpeg
+def test_seeked_job_produces_the_same_segment_as_a_sequential_one(tmp_path, monkeypatch, h264_encoder):
+    # The old fixed-grid seek was non-deterministic: "-ss N*6" snapped to
+    # whatever keyframe was nearest, so a job seeked to segment N cut
+    # different content than a sequential job passing through N. With
+    # stored boundaries plus the seek-landing probe, both must produce a
+    # segment starting at the same keyframe with the same duration.
+    #
+    # The keyframes here are deliberately IRREGULAR (so every segment has
+    # a different length): an earlier version of this test used a uniform
+    # 2s cadence, and a confirmed live bug slipped straight through it --
+    # ffmpeg's -ss landed one seek point early on mkv (its ~0.13s dts
+    # heuristic), producing a segment of *wrong content* whose duration
+    # happened to match because every GOP was the same size. Duration
+    # assertions only mean something when the expected lengths are
+    # distinguishable.
+    from app import scanner
+
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+    mkv_path = tmp_path / "clip.mkv"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc=size=64x64:rate=25:duration=20",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=20",
+            "-force_key_frames", "0,4,9,15",
+            "-c:v", h264_encoder, "-c:a", "aac", "-shortest",
+            str(mkv_path),
+        ],
+        check=True,
+    )
+
+    boundaries = transcode.compute_segment_boundaries(
+        scanner.probe_keyframes(mkv_path), duration=20.0
+    )
+    assert boundaries == pytest.approx([0.0, 9.0, 15.0], abs=0.05)
+
+    def segment_duration(path):
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "csv=p=0", str(path),
+            ],
+            capture_output=True, text=True, check=True,
+        )
+        return float(probe.stdout.strip())
+
+    # Sequential: a job starting at 0 passes through segment 1 on its way.
+    sequential = transcode.ensure_segment(604, mkv_path, remux_audio=False, index=1, boundaries=boundaries)
+    sequential_duration = segment_duration(sequential)
+
+    # Seeked: a fresh media id (fresh hls dir) asked directly for the
+    # final segment -- the landing probe may legitimately start the job at
+    # an earlier boundary (mkv seeks land short), but the file served for
+    # index 2 must still be exactly [15, 20).
+    seeked = transcode.ensure_segment(605, mkv_path, remux_audio=False, index=2, boundaries=boundaries)
+    seeked_duration = segment_duration(seeked)
+
+    assert sequential_duration == pytest.approx(15.0 - 9.0, abs=0.3)
+    assert seeked_duration == pytest.approx(20.0 - 15.0, abs=0.3)
+
+    # And a seeked request for the same middle segment the sequential job
+    # produced must match it.
+    seeked_middle = transcode.ensure_segment(606, mkv_path, remux_audio=False, index=1, boundaries=boundaries)
+    assert segment_duration(seeked_middle) == pytest.approx(sequential_duration, abs=0.15)
 
 
 @requires_ffmpeg

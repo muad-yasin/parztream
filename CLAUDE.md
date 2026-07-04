@@ -96,9 +96,14 @@ skipping) plus the e2e suite on Ubuntu.
 - `app/db.py` — raw `sqlite3` access via a `get_connection()`
   context manager (opens, commits on success, always closes). Two
   tables: `media` and `settings` (a plain key/value store, currently
-  just holding `media_dirs` as a JSON-encoded list). No migrations
-  system yet — schema changes mean editing `SCHEMA` in this file
-  (existing dev DBs need to be deleted and rescanned). `media` has
+  just holding `media_dirs` as a JSON-encoded list). Schema changes
+  mean editing `SCHEMA` in this file, plus — since real installs now
+  have DBs that also hold user configuration, so "delete and rescan"
+  stopped being an acceptable upgrade path — adding an `ALTER TABLE
+  ... ADD COLUMN` entry to `_MEDIA_COLUMN_MIGRATIONS`, which
+  `init_db()` applies to any existing DB missing the column (the
+  project's entire migrations system so far; `segment_boundaries` was
+  the first column added this way). `media` has
   since grown `is_movie`/`is_extra` columns (both computed at scan
   time, see `app/scanner.py`) for the Movies/TV-Shows poster-grid UI —
   if you read further down and hit a note claiming a feature "needed
@@ -329,19 +334,72 @@ skipping) plus the e2e suite on Ubuntu.
   it" approach meant a request for a large file blocked for however
   long the *entire* remux took (minutes, for a large file) before any
   bytes could be served, and two viewers of the same uncached file
-  serialized on each other. Instead, `build_playlist(duration)`
-  returns a static, complete VOD `.m3u8` computed once from the file's
-  known duration (every segment index listed upfront, even though most
+  serialized on each other. Instead, `build_playlist(duration,
+  boundaries)` returns a static, complete VOD `.m3u8` computed once
+  from the file's known duration and its **keyframe-accurate segment
+  boundaries** (every segment index listed upfront, even though most
   don't exist as files yet), and `ensure_segment(media_id, src_path,
-  remux_audio, index, ...)` generates one ~6s segment (`SEGMENT_SECONDS`)
-  at a time, on demand, into `CACHE_DIR/{media_id}_hls/segment_NNNNN.ts`,
-  via `ffmpeg -f segment -segment_time 6 -segment_start_number N`. This
-  is what makes seeking work correctly even mid-conversion: a segment
-  request either finds it already cached, joins a job already headed
-  there (`_find_or_start_job`, deduped per `hls_dir` via `_jobs`/
-  `_jobs_guard`, with `LOOKAHEAD_SEGMENTS` deciding "close enough to
-  just wait" vs. spawning a new job), or starts a fresh `ffmpeg -ss
-  <time>` job seeked directly to that point. A segment file existing
+  remux_audio, index, ..., boundaries)` generates one segment at a
+  time, on demand, into `CACHE_DIR/{media_id}_hls/segment_NNNNN.ts`,
+  cutting at exactly those boundaries via `ffmpeg -f segment
+  -segment_times t1,t2,... -segment_start_number N`. The boundaries
+  (`compute_segment_boundaries`, a greedy "first keyframe at least
+  `SEGMENT_SECONDS` past the previous boundary" walk over the
+  keyframe timestamps `app/scanner.py`'s `probe_keyframes` extracts)
+  fixed a confirmed-real stutter/A/V-desync bug: `-c:v copy` can only
+  cut at keyframes, so the old fixed-6s-grid playlist's EXTINF values
+  lied about real segment durations, and with `-reset_timestamps 1`
+  hls.js has nothing but EXTINF to place segments — the mismatch
+  accumulated as drift. Boundaries are computed at scan time (only
+  for files that would actually route through HLS — the keyframe
+  probe walks every packet, so it's cached by path+size like the
+  packet-scan duration fallback and never run for direct-play files),
+  stored as JSON in `media.segment_boundaries`, lazily backfilled by
+  `app/routers/stream.py`'s `_segment_boundaries` for legacy/skipped
+  rows (persist + `invalidate_segments()` to drop old fixed-grid
+  segments), with a `boundaries=None` fixed-grid fallback kept only
+  for files whose keyframes genuinely can't be probed.
+  `KEYFRAME_TIME_GUARD` (1ms) nudges `-ss` just past and split times
+  just before their keyframe so float/timebase rounding can't snap a
+  cut to a neighboring keyframe — see its comment before touching any
+  of the time math. Seeking works correctly even mid-conversion: a
+  segment request either finds it already cached, joins a job already
+  headed there (`_find_or_start_job`, deduped per `hls_dir` via
+  `_jobs`/`_jobs_guard`, with `LOOKAHEAD_SEGMENTS` deciding "close
+  enough to just wait" vs. spawning a new job), or starts a fresh
+  `ffmpeg -ss <boundary>` job seeked directly to that point — and
+  because any two jobs asked for "segment N" now cut at the same
+  stored boundary, seeks are deterministic (the old grid's `-ss N*6`
+  snapped to whatever keyframe was nearest, so two jobs could produce
+  different content for the same index). A seeked **stream-copy** job
+  never trusts `-ss` blindly: confirmed live, ffmpeg's CLI subtracts
+  an internal ~0.13s "dts heuristic" (`3*AV_TIME_BASE/23`) from the
+  requested seek target whenever the video has B-frame reordering and
+  the demuxer doesn't seek by pts — true for mkv, the main container
+  routed through here (mp4-family is exempt) — so a seek aimed just
+  past a boundary keyframe lands one seek point *short*, which
+  mis-cut every following segment (observed: a 15s segment where the
+  playlist promised 8s, containing the wrong content). Instead,
+  `_probe_seek_landing` asks the same ffmpeg binary to do the same
+  seek and reports where it actually lands (one packet via
+  `-f framecrc`, demux-only), `_resolve_copy_seek` walks down until
+  the landing provably IS a boundary (worst case: start from 0,
+  always correct, capped by `SEEK_PROBE_LIMIT`), and the job anchors
+  `-segment_start_number` and its split times to that landed boundary
+  — the segment muxer measures `-segment_times` from the first packet
+  it receives (also confirmed empirically; neither absolute-`-copyts`
+  times nor times relative to the *requested* seek align when the
+  landing differs). `-copyts` pins the timeline the splits are
+  measured on, and `-noaccurate_seek` keeps a transcoded audio track
+  flowing from the landing alongside the copied video (accurate_seek
+  would decode-drop audio up to the requested time, leaving the first
+  regenerated segments silent). Re-encode jobs skip all of this —
+  decoding plus default accurate_seek is already frame-exact at the
+  requested boundary. If you touch any of this, the uniform-keyframe
+  trap matters for tests too: a clip with evenly spaced keyframes can
+  produce the *wrong content at the right duration*, so duration
+  assertions only prove correctness when the expected segment lengths
+  are irregular. A segment file existing
   on disk is *not* proof it's finished being written (ffmpeg's segment
   muxer keeps the current one open) — `ensure_segment`'s wait loop
   only trusts a segment once the *next* segment has appeared or the
@@ -356,7 +414,11 @@ skipping) plus the e2e suite on Ubuntu.
   checks `app/encoder_detect.py`'s `get_encoder()` before deciding —
   if it finds a working encoder, `NeedsHlsRemux(reencode_video=True)`
   is raised instead of `UnsupportedVideoCodec`, and `_start_job` swaps
-  `-c:v copy` for `-c:v <encoder> -vf scale=...` (see `_scale_args`,
+  `-c:v copy` for `-c:v <encoder> -vf scale=...` plus
+  `-force_key_frames` at every segment boundary — the encoder must
+  emit an IDR frame exactly where the muxer will cut so every
+  re-encoded segment starts decodable, which stream-copy gets for free
+  from the source's own keyframes (see `_scale_args`,
   which caps re-encodes at 1080p, never upscales, and is a no-op —
   same "don't guess" pattern as elsewhere — when `video_width`/
   `video_height` are unknown). This is deliberately gated behind both

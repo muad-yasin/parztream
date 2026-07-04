@@ -11,14 +11,17 @@ requires_ffmpeg = pytest.mark.skipif(
 )
 
 
-def _insert_media(path, media_type="audio", video_codec=None, audio_codec=None, duration=None):
+def _insert_media(path, media_type="audio", video_codec=None, audio_codec=None, duration=None,
+                  segment_boundaries=None):
     with get_connection() as conn:
         cur = conn.execute(
             """
-            INSERT INTO media (path, media_type, title, size_bytes, video_codec, audio_codec, duration)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO media (path, media_type, title, size_bytes, video_codec, audio_codec,
+                               duration, segment_boundaries)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (str(path), media_type, path.stem, path.stat().st_size, video_codec, audio_codec, duration),
+            (str(path), media_type, path.stem, path.stat().st_size, video_codec, audio_codec,
+             duration, segment_boundaries),
         )
         return cur.lastrowid
 
@@ -341,3 +344,100 @@ def test_hls_segment_endpoint_returns_503_when_transcode_slot_unavailable(client
     res = client.get(f"/api/stream/{media_id}/hls/segment_00000.ts")
 
     assert res.status_code == 503
+
+
+def test_hls_playlist_extinf_values_come_from_stored_boundaries(client, make_file):
+    import json
+
+    f = make_file("clip.mkv", b"not real video data")
+    media_id = _insert_media(
+        f, "video", video_codec="h264", audio_codec="aac", duration=23.0,
+        segment_boundaries=json.dumps([0.0, 6.5, 14.2]),
+    )
+
+    res = client.get(f"/api/stream/{media_id}/hls/playlist.m3u8")
+
+    assert res.status_code == 200
+    extinf = [float(l[len("#EXTINF:"):].rstrip(",")) for l in res.text.splitlines() if l.startswith("#EXTINF:")]
+    assert extinf == pytest.approx([6.5, 7.7, 8.8], abs=0.001)
+    # Largest real segment is 8.8s -- a spec-compliant TARGETDURATION must
+    # cover it, not hardcode the old 6s grid value.
+    assert "#EXT-X-TARGETDURATION:9" in res.text
+
+
+def test_legacy_row_gets_boundaries_backfilled_on_first_playlist_request(client, make_file, monkeypatch):
+    # A row scanned before the segment_boundaries column existed: the first
+    # HLS request must probe/compute/persist boundaries (so it only happens
+    # once) and clear any segments cached on the old fixed grid.
+    import json
+
+    from app import scanner, transcode
+
+    f = make_file("clip.mkv", b"not real video data")
+    media_id = _insert_media(f, "video", video_codec="h264", audio_codec="aac", duration=14.0)
+
+    stale = transcode.hls_dir_for(media_id) / "segment_00000.ts"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes(b"cut on the old fixed grid")
+
+    probe_calls = []
+
+    def fake_probe(path):
+        probe_calls.append(path)
+        return [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
+
+    monkeypatch.setattr(scanner, "probe_keyframes", fake_probe)
+
+    res = client.get(f"/api/stream/{media_id}/hls/playlist.m3u8")
+    assert res.status_code == 200
+    extinf = [float(l[len("#EXTINF:"):].rstrip(",")) for l in res.text.splitlines() if l.startswith("#EXTINF:")]
+    assert extinf == pytest.approx([6.0, 6.0, 2.0], abs=0.001)
+
+    with get_connection() as conn:
+        stored = conn.execute(
+            "SELECT segment_boundaries FROM media WHERE id = ?", (media_id,)
+        ).fetchone()["segment_boundaries"]
+    assert json.loads(stored) == [0.0, 6.0, 12.0]
+    assert not stale.exists()
+
+    # Second request reads the persisted value -- the packet walk is paid
+    # exactly once per file.
+    res = client.get(f"/api/stream/{media_id}/hls/playlist.m3u8")
+    assert res.status_code == 200
+    assert len(probe_calls) == 1
+
+
+def test_playlist_falls_back_to_fixed_grid_when_keyframes_cant_be_probed(client, make_file, monkeypatch):
+    from app import scanner
+
+    f = make_file("clip.mkv", b"not real video data")
+    media_id = _insert_media(f, "video", video_codec="h264", audio_codec="aac", duration=14.0)
+    monkeypatch.setattr(scanner, "probe_keyframes", lambda path: None)
+
+    res = client.get(f"/api/stream/{media_id}/hls/playlist.m3u8")
+
+    # Degraded but working: the original fixed-6s-grid playlist.
+    assert res.status_code == 200
+    assert "#EXT-X-TARGETDURATION:6" in res.text
+    assert "segment_00002.ts" in res.text
+    # Not persisted as a failure -- a later request/rescan should retry
+    # rather than wedging the file on the degraded path forever.
+    with get_connection() as conn:
+        stored = conn.execute(
+            "SELECT segment_boundaries FROM media WHERE id = ?", (media_id,)
+        ).fetchone()["segment_boundaries"]
+    assert stored is None
+
+
+def test_segment_request_past_the_boundary_playlist_end_404s(client, make_file):
+    import json
+
+    f = make_file("clip.mkv", b"not real video data")
+    media_id = _insert_media(
+        f, "video", video_codec="h264", audio_codec="aac", duration=14.0,
+        segment_boundaries=json.dumps([0.0, 6.0, 12.0]),
+    )
+
+    res = client.get(f"/api/stream/{media_id}/hls/segment_00003.ts")
+
+    assert res.status_code == 404

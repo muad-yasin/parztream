@@ -9,7 +9,7 @@ from pathlib import Path
 
 from mutagen import File as MutagenFile
 
-from . import settings
+from . import settings, transcode
 from .config import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS
 from .db import get_connection
 
@@ -213,27 +213,53 @@ def _upsert_media(conn, path: Path, media_type: str, media_root: Path = None, is
     # trade-off, the same class of assumption any size/mtime-based change
     # detection makes.
     cached_duration = None
+    cached_boundaries = None
+    existing = None
     if media_type == "video":
         existing = conn.execute(
-            "SELECT duration, size_bytes FROM media WHERE path = ?", (str(path),)
+            "SELECT id, duration, size_bytes, segment_boundaries FROM media WHERE path = ?",
+            (str(path),),
         ).fetchone()
-        if existing is not None and existing["size_bytes"] == size_bytes and existing["duration"] is not None:
-            cached_duration = existing["duration"]
+        if existing is not None and existing["size_bytes"] == size_bytes:
+            if existing["duration"] is not None:
+                cached_duration = existing["duration"]
+            # Boundaries are cached under the same path+size key and for the
+            # same reason as the duration fallback: the keyframe probe walks
+            # every packet, so re-running it on every rescan of a large file
+            # would turn rescans genuinely expensive.
+            cached_boundaries = existing["segment_boundaries"]
 
-    info = _extract_metadata(path, media_type, media_root, is_movie_folder, cached_duration)
+    info = _extract_metadata(
+        path, media_type, media_root, is_movie_folder, cached_duration, cached_boundaries,
+    )
     info["size_bytes"] = size_bytes
+
+    # Boundaries newly computed (or recomputed after the file changed) make
+    # any segments already cached for this media stale -- they were cut on
+    # different points than the playlist will now claim. Only ever fires on
+    # a genuine transition (legacy NULL row gaining boundaries, or a
+    # replaced file), never on the steady-state rescan where the cached
+    # value is simply reused.
+    if (
+        existing is not None
+        and info["segment_boundaries"] is not None
+        and info["segment_boundaries"] != existing["segment_boundaries"]
+    ):
+        transcode.invalidate_segments(existing["id"])
     conn.execute(
         """
         INSERT INTO media
             (path, media_type, title, artist, album, duration, size_bytes,
              video_codec, audio_codec, video_width, video_height,
              audio_channels, audio_stream_index,
-             show_name, season_number, episode_number, is_movie, is_extra)
+             show_name, season_number, episode_number, is_movie, is_extra,
+             segment_boundaries)
         VALUES
             (:path, :media_type, :title, :artist, :album, :duration, :size_bytes,
              :video_codec, :audio_codec, :video_width, :video_height,
              :audio_channels, :audio_stream_index,
-             :show_name, :season_number, :episode_number, :is_movie, :is_extra)
+             :show_name, :season_number, :episode_number, :is_movie, :is_extra,
+             :segment_boundaries)
         ON CONFLICT(path) DO UPDATE SET
             title=excluded.title, artist=excluded.artist, album=excluded.album,
             duration=excluded.duration, size_bytes=excluded.size_bytes,
@@ -242,7 +268,7 @@ def _upsert_media(conn, path: Path, media_type: str, media_root: Path = None, is
             audio_channels=excluded.audio_channels, audio_stream_index=excluded.audio_stream_index,
             show_name=excluded.show_name, season_number=excluded.season_number,
             episode_number=excluded.episode_number, is_movie=excluded.is_movie,
-            is_extra=excluded.is_extra
+            is_extra=excluded.is_extra, segment_boundaries=excluded.segment_boundaries
         """,
         {"path": str(path), "media_type": media_type, **info},
     )
@@ -251,7 +277,7 @@ def _upsert_media(conn, path: Path, media_type: str, media_root: Path = None, is
 
 def _extract_metadata(
     path: Path, media_type: str, media_root: Path = None, is_movie_folder: bool = False,
-    cached_duration: float = None,
+    cached_duration: float = None, cached_boundaries: str = None,
 ):
     info = {
         "title": path.stem,
@@ -269,6 +295,7 @@ def _extract_metadata(
         "episode_number": None,
         "is_movie": False,
         "is_extra": False,
+        "segment_boundaries": None,
     }
 
     if media_type == "audio":
@@ -292,6 +319,25 @@ def _extract_metadata(
             info["video_width"], info["video_height"],
             info["audio_channels"], info["audio_stream_index"],
         ) = _probe_video_info(path, cached_duration)
+
+        # Keyframe-derived HLS segment boundaries -- only for files that
+        # would actually route through the HLS remux path (the probe walks
+        # every packet, so it's never run speculatively for direct-play
+        # files), and only when not already cached from a previous scan of
+        # this same file (see _upsert_media). Stays None -- lazily
+        # backfilled on first HLS request instead, see
+        # app/routers/stream.py -- when the keyframe probe fails.
+        if info["duration"] is not None and transcode.needs_segment_boundaries(
+            path, info["video_codec"], info["audio_codec"], info["audio_channels"]
+        ):
+            if cached_boundaries is not None:
+                info["segment_boundaries"] = cached_boundaries
+            else:
+                boundaries = transcode.compute_segment_boundaries(
+                    probe_keyframes(path), info["duration"]
+                )
+                if boundaries is not None:
+                    info["segment_boundaries"] = json.dumps(boundaries)
 
         show_name, season_number, episode_number, is_extra = (None, None, None, False)
         if media_root is not None:
@@ -620,6 +666,56 @@ def _choose_audio_stream(audio_streams: list):
         if not entry[3]:
             return entry
     return audio_streams[0]
+
+
+def probe_keyframes(path: Path):
+    """The video stream's keyframe timestamps in seconds, ascending, or
+    None if they couldn't be determined (ffprobe missing/failed, or no
+    keyframes found -- e.g. a corrupt file). Public, unlike this module's
+    other probes, because app/routers/stream.py's lazy boundary backfill
+    calls it too -- keeping the ffprobe invocation here preserves "the
+    scanner is the only place file-metadata extraction happens".
+
+    Uses the packet-flags approach (demux-only, filter for the K flag)
+    rather than `-skip_frame nokey -show_entries frame=...`, which decodes
+    and is far slower. Still a full packet walk though -- same cost profile
+    as _probe_duration_via_packets below (proportional to the file's
+    duration/bitrate, genuinely not cheap for a large file), which is why
+    it's only run for files that actually need HLS boundaries and why
+    _upsert_media caches the result keyed on path + size_bytes."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "packet=pts_time,flags",
+                "-of", "csv=print_section=0",
+                str(path),
+            ],
+            capture_output=True, text=True, timeout=240,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+
+    keyframes = []
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(",")
+        if len(parts) < 2 or "K" not in parts[1]:
+            continue
+        try:
+            keyframes.append(float(parts[0]))
+        except ValueError:
+            # pts_time can be "N/A" for packets some demuxers can't
+            # timestamp -- skip those rather than aborting the whole probe.
+            continue
+
+    if not keyframes:
+        return None
+    # Packets aren't guaranteed to demux in presentation order (B-frame
+    # reordering) -- boundaries must be, for the greedy walk in
+    # compute_segment_boundaries and for the playlist's monotonic timeline.
+    keyframes.sort()
+    return keyframes
 
 
 def _probe_duration_via_packets(path: Path):

@@ -1,3 +1,4 @@
+import json
 import logging
 import mimetypes
 import re
@@ -7,7 +8,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
-from .. import transcode
+from .. import cache, scanner, transcode
 from ..db import get_connection
 
 router = APIRouter(prefix="/api", tags=["stream"])
@@ -123,6 +124,47 @@ def _require_hls(row):
     raise HTTPException(status_code=400, detail="This file doesn't need HLS remuxing")
 
 
+def _segment_boundaries(row):
+    """This row's keyframe-accurate HLS segment boundaries, backfilling
+    lazily for a legacy row scanned before the segment_boundaries column
+    existed (or one the scanner skipped, e.g. transcoding was off then and
+    is on now): probe the keyframes now, persist the result so this only
+    ever happens once per file, and invalidate any segments cached on the
+    old fixed 6s grid -- they don't line up with the boundary-derived
+    playlist about to be served. Returns None (callers fall back to the
+    old fixed-grid behavior) when the probe finds nothing to work from;
+    deliberately not persisted as a failure marker, so a later request or
+    rescan retries rather than wedging the file on the degraded path
+    forever. The lock collapses concurrent first requests (playlist +
+    first segments arrive nearly together) into one packet walk -- same
+    dedup-by-key pattern as the remux/thumbnail caches."""
+    if row["segment_boundaries"]:
+        return json.loads(row["segment_boundaries"])
+    if row["duration"] is None:
+        return None
+    with cache.lock_for(f"segment_boundaries:{row['id']}"):
+        # A request that waited on the lock finds the winner's result here
+        # instead of re-paying for the probe.
+        with get_connection() as conn:
+            fresh = conn.execute(
+                "SELECT segment_boundaries FROM media WHERE id = ?", (row["id"],)
+            ).fetchone()
+        if fresh is not None and fresh["segment_boundaries"]:
+            return json.loads(fresh["segment_boundaries"])
+        boundaries = transcode.compute_segment_boundaries(
+            scanner.probe_keyframes(Path(row["path"])), row["duration"]
+        )
+        if boundaries is None:
+            return None
+        with get_connection() as conn:
+            conn.execute(
+                "UPDATE media SET segment_boundaries = ? WHERE id = ?",
+                (json.dumps(boundaries), row["id"]),
+            )
+        transcode.invalidate_segments(row["id"])
+        return boundaries
+
+
 @router.get("/stream/{media_id}/hls/playlist.m3u8")
 def stream_hls_playlist(media_id: int):
     row = _get_media_row(media_id)
@@ -134,7 +176,7 @@ def stream_hls_playlist(media_id: int):
             detail="Video duration unknown; try rescanning the library.",
         )
 
-    playlist = transcode.build_playlist(row["duration"])
+    playlist = transcode.build_playlist(row["duration"], _segment_boundaries(row))
     return Response(content=playlist, media_type="application/vnd.apple.mpegurl")
 
 
@@ -156,7 +198,7 @@ def stream_hls_segment(media_id: int, segment_name: str):
         segment_path = transcode.ensure_segment(
             media_id, original_path, remux_audio, index,
             reencode_video, row["video_width"], row["video_height"],
-            row["audio_stream_index"],
+            row["audio_stream_index"], _segment_boundaries(row),
         )
     except transcode.RemuxFailed as exc:
         logger.error("Remux failed for media %s: %s", media_id, exc)

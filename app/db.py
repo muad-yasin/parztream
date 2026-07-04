@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS media (
     episode_number INTEGER,
     is_movie INTEGER NOT NULL DEFAULT 0,
     is_extra INTEGER NOT NULL DEFAULT 0,
+    segment_boundaries TEXT,
     added_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_media_type ON media(media_type);
@@ -48,6 +49,25 @@ def get_connection():
         conn.close()
 
 
+# Columns added to the media table after it first shipped, applied via
+# ALTER TABLE when missing -- the first (tiny) migration mechanism this
+# project has. Earlier schema changes just said "delete the dev DB and
+# rescan", but segment_boundaries landed after real installs existed whose
+# DBs also hold user configuration (the settings table), so wiping is no
+# longer an acceptable upgrade path. Rows keep a NULL value until the next
+# scan (or a lazy backfill on first HLS request -- see
+# app/routers/stream.py) fills it in.
+_MEDIA_COLUMN_MIGRATIONS = {
+    "segment_boundaries": "ALTER TABLE media ADD COLUMN segment_boundaries TEXT",
+}
+
+
 def init_db():
     with get_connection() as conn:
         conn.executescript(SCHEMA)
+        existing_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(media)")
+        }
+        for column, statement in _MEDIA_COLUMN_MIGRATIONS.items():
+            if column not in existing_columns:
+                conn.execute(statement)
