@@ -647,11 +647,15 @@ async function playMedia(item, rowBtn) {
   playerContainer.appendChild(el);
 
   if (hlsPlaylistUrl) {
-    if (el.canPlayType("application/vnd.apple.mpegurl")) {
-      // Safari has native HLS support built into <video> -- no library
-      // needed at all.
-      el.src = hlsPlaylistUrl;
-    } else if (window.Hls && window.Hls.isSupported()) {
+    // hls.js first, native canPlayType() second -- the order matters and
+    // is the one hls.js's own docs prescribe. Chromium 149 answers "maybe"
+    // to canPlayType("application/vnd.apple.mpegurl") while being unable
+    // to actually demux HLS (caught by tests/e2e against a real browser:
+    // checking native support first sent Chromium down the native path and
+    // every HLS playback died with a decode error). Safari still works via
+    // either branch: macOS has MSE so hls.js runs, and iOS -- where hls.js
+    // can't run at all -- falls through to its genuinely-native support.
+    if (window.Hls && window.Hls.isSupported()) {
       const hls = new Hls();
       hls.on(Hls.Events.ERROR, (event, data) => {
         if (!data.fatal) return;
@@ -660,6 +664,10 @@ async function playMedia(item, rowBtn) {
       });
       hls.loadSource(hlsPlaylistUrl);
       hls.attachMedia(el);
+    } else if (el.canPlayType("application/vnd.apple.mpegurl")) {
+      // iOS Safari: no MSE, so hls.js can't run -- but HLS support is
+      // native in <video> there.
+      el.src = hlsPlaylistUrl;
     } else {
       playerContainer.innerHTML = "";
       const msg = document.createElement("p");

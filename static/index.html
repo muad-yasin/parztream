@@ -75,10 +75,11 @@
 
   <div id="status-announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 
-  <!-- Vendored, self-hosted (no CDN) -- lets Chrome/Firefox play the HLS
-       streams app/transcode.py produces for files needing a container/audio
-       fix. Safari has native HLS support and doesn't need this at all (see
-       app.js's playMedia). -->
+  <!-- Vendored, self-hosted (no CDN) -- plays the HLS streams
+       app/transcode.py produces for files needing a container/audio fix.
+       Preferred over native HLS wherever MSE exists (see app.js's playMedia
+       for why that order is load-bearing); only iOS Safari, which has no
+       MSE, uses its native support instead. -->
   <script src="/hls.min.js"></script>
   <script src="/app.js"></script>
 </body>

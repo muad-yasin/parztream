@@ -176,9 +176,14 @@ genuinely can't fix (see TS_SAFE_VIDEO_CODECS).
   the packet-scan duration fallback is cached across rescans (see git
   log), but still a real gap if ffprobe genuinely can't read a file at
   all.
-- [ ] **PB7. `canPlayType("application/vnd.apple.mpegurl")` truthiness
+- [x] **PB7. `canPlayType("application/vnd.apple.mpegurl")` truthiness
   no longer reliably means "Safari, use native HLS" — confirmed to
-  misfire on a real, current Chromium build.** `static/app.js`'s
+  misfire on a real, current Chromium build.** *Fixed (2026-07-04):
+  `playMedia()` now prefers `Hls.isSupported()` and only falls back to
+  native `el.src` when hls.js can't run (iOS Safari) — exactly the fix
+  direction below. Independently re-caught, then verified fixed, by the
+  new `tests/e2e` Playwright suite's HLS playback test, which fails
+  against a real Chromium if this regresses.* `static/app.js`'s
   `playMedia()` branches on `el.canPlayType(...)` being truthy to decide
   between native HLS (`el.src = hlsPlaylistUrl`, meant for Safari) and
   hls.js (`new Hls(); hls.loadSource(...); hls.attachMedia(...)`).
