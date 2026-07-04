@@ -29,6 +29,12 @@ pip install -r requirements-dev.txt
 pytest                       # whole suite
 pytest tests/test_stream.py  # one file
 pytest -k out_of_bounds      # by name
+
+# Browser end-to-end tests (real uvicorn subprocess + Playwright
+# Chromium; excluded from plain `pytest` by pytest.ini's addopts, so
+# blank that out to run them)
+playwright install chromium  # one-time browser download
+pytest tests/e2e -o addopts=""
 ```
 
 There is no linter or build step yet.
@@ -37,6 +43,26 @@ Tests live in `tests/`, run against tmp-path DB/media dirs via an
 autouse fixture in `tests/conftest.py` (see below), never your real
 config. A couple of `test_scanner.py` cases need real audio and are
 skipped automatically when `ffmpeg` isn't on `PATH`.
+
+`tests/e2e/` is a separate, opt-in layer: smoke tests driving the real
+web UI in a real Chromium via Playwright, against a genuine `uvicorn`
+subprocess configured through actual env vars (its own
+`tests/e2e/conftest.py`, which deliberately does *not* reuse
+`tests/conftest.py`'s in-process monkeypatching — see the module
+docstring). It exists to catch the "passes under TestClient, breaks in
+a real browser" class — and did so immediately: on its first-ever run
+it caught Chromium 149 claiming native HLS support via `canPlayType()`
+that it doesn't actually have (see the `static/` section below). The
+synthetic test video forces a keyframe every second — a static
+`lavfi`-generated clip otherwise has exactly one keyframe, which makes
+`app/transcode.py`'s segmenter produce one giant segment plus a
+byte-identical duplicate for index 1 (segment splits and `-ss` seeks
+both land on keyframes), and real browsers reject that with a decode
+error that has nothing to do with the code under test.
+`.github/workflows/test.yml` runs the unit suite on every push/PR on
+Ubuntu **and** Windows (with real ffmpeg installed, so the
+`requires_ffmpeg` integration tests actually run in CI rather than
+skipping) plus the e2e suite on Ubuntu.
 
 ## Architecture
 
@@ -522,7 +548,17 @@ skipped automatically when `ffmpeg` isn't on `PATH`.
   plus a `<track>` for
   video pointed at `/api/library/{id}/subtitles` (no pre-check needed
   here — a 404 on a `<track src>` just gets ignored by the browser,
-  unlike a `<video src>` 415). Also polls `/api/scan/status` after
+  unlike a `<video src>` 415). When the probe says a file needs HLS,
+  the attach order is **hls.js first, native
+  `canPlayType("application/vnd.apple.mpegurl")` second** — the order
+  hls.js's own docs prescribe, and load-bearing, not stylistic:
+  Chromium 149 answers `"maybe"` to that `canPlayType` while being
+  unable to actually demux HLS, so the old native-first order sent it
+  down the native path and every HLS playback died with a decode error
+  (caught by `tests/e2e` on its first run, confirmed against a real
+  browser). iOS Safari — no MSE, so hls.js can't run there — still
+  reaches its genuinely-native support through the fallback branch.
+  Don't flip this back. Also polls `/api/scan/status` after
   triggering a scan (the trigger endpoint returns immediately, it
   doesn't wait for the scan to finish). `init()` checks
   `GET /api/setup/status` before anything else and redirects to
