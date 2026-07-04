@@ -11,6 +11,7 @@ const scanBannerText = document.getElementById("scan-banner-text");
 const scanDiagnosticsEl = document.getElementById("scan-diagnostics");
 const scanDiagnosticsSummaryEl = document.getElementById("scan-diagnostics-summary");
 const scanDiagnosticsListEl = document.getElementById("scan-diagnostics-list");
+const scanDiagnosticsCloseBtn = document.getElementById("scan-diagnostics-close");
 
 const homeViewEl = document.getElementById("home-view");
 const searchViewEl = document.getElementById("search-view");
@@ -80,6 +81,16 @@ function renderScanDiagnostics(status) {
   scanDiagnosticsEl.hidden = false;
 }
 
+scanDiagnosticsCloseBtn.addEventListener("click", (event) => {
+  // The button lives inside <summary> (the only child a closed <details>
+  // renders at all) -- without preventDefault/stopPropagation, activating
+  // it would also toggle the disclosure open/closed, same click.
+  event.preventDefault();
+  event.stopPropagation();
+  scanDiagnosticsEl.hidden = true;
+  announce("Scan summary dismissed.");
+});
+
 // Replaces the whole list with a single centered message -- used for the
 // loading state, network/server errors, and (via renderList) empty results,
 // so there's always some feedback in the list area instead of a blank gap.
@@ -91,6 +102,38 @@ function showListMessage(text) {
   listEl.appendChild(li);
 }
 
+// Renders a dismissible status/error message into #player-container,
+// replacing whatever's currently there. downloadUrl, when given, appends a
+// "Download it instead" link (callers suppress this for audio items).
+function showPlayerMessage(text, { downloadUrl } = {}) {
+  playerContainer.innerHTML = "";
+  const msg = document.createElement("div");
+  msg.className = "player-message";
+  const textSpan = document.createElement("span");
+  textSpan.textContent = text;
+  msg.appendChild(textSpan);
+  if (downloadUrl) {
+    textSpan.textContent += " ";
+    const link = document.createElement("a");
+    link.href = downloadUrl;
+    link.textContent = "Download it instead";
+    link.download = "";
+    msg.appendChild(link);
+  }
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "dismiss-btn";
+  closeBtn.setAttribute("aria-label", "Dismiss message");
+  closeBtn.textContent = "×";
+  closeBtn.addEventListener("click", () => {
+    playerContainer.innerHTML = "";
+    announce("Message dismissed.");
+  });
+  msg.appendChild(closeBtn);
+  playerContainer.appendChild(msg);
+  announce(text);
+}
+
 // Replaces the player with a clear error message -- used by both the
 // native media-element `error` event and hls.js's fatal-error event, so a
 // playback failure that happens *after* the pre-play codec probe (a
@@ -100,19 +143,9 @@ function showListMessage(text) {
 // underlying file may still be playable in another app even if this
 // browser choked on it mid-stream.
 function showPlaybackError(item, message) {
-  playerContainer.innerHTML = "";
-  const msg = document.createElement("p");
-  msg.className = "player-message";
-  msg.textContent = message + " ";
-  if (item.media_type !== "audio") {
-    const link = document.createElement("a");
-    link.href = `/api/stream/${item.id}?original=1`;
-    link.textContent = "Download it instead";
-    link.download = "";
-    msg.appendChild(link);
-  }
-  playerContainer.appendChild(msg);
-  announce(message);
+  showPlayerMessage(message, {
+    downloadUrl: item.media_type !== "audio" ? `/api/stream/${item.id}?original=1` : undefined,
+  });
 }
 
 const MEDIA_ERROR_MESSAGES = {
@@ -182,6 +215,10 @@ async function loadLibrary() {
 // full reload when play starts).
 let activePlayingId = null;
 let activeRowBtn = null;
+// The active hls.js instance, if the current player is HLS-backed -- tracked
+// so it can be torn down (stopPlayer / a new playMedia call) instead of left
+// running its segment-fetch loop against a detached <video> element.
+let activeHls = null;
 
 // Builds the shared "thumbnail + label" row used by the flat search list,
 // a show's per-season episode lists, and its Extras list -- one visual/
@@ -517,12 +554,45 @@ function getResumePosition(id) {
   }
 }
 
+// Fully stops and tears down the current player: pauses/releases the media
+// element, destroys any active hls.js instance (otherwise its internal
+// segment-fetch loop keeps running against a detached element), clears the
+// row highlight, and empties the container back to its initial state.
+function stopPlayer() {
+  const el = playerContainer.querySelector("video, audio");
+  if (el) {
+    el.pause();
+    el.removeAttribute("src");
+    el.load();
+  }
+  if (activeHls) {
+    activeHls.destroy();
+    activeHls = null;
+  }
+  if (activeRowBtn) {
+    activeRowBtn.classList.remove("row-btn-active");
+    activeRowBtn.removeAttribute("aria-current");
+    activeRowBtn = null;
+  }
+  activePlayingId = null;
+  playerContainer.innerHTML = "";
+  announce("Playback stopped.");
+}
+
 async function playMedia(item, rowBtn) {
   const streamUrl = `/api/stream/${item.id}`;
 
   if (activeRowBtn) {
     activeRowBtn.classList.remove("row-btn-active");
     activeRowBtn.removeAttribute("aria-current");
+  }
+  // A previous player's hls.js instance (if any) is about to be replaced by
+  // the innerHTML wipe below, which would otherwise leave it running its
+  // segment-fetch loop against a now-detached <video> -- same cleanup
+  // stopPlayer() does when the user closes the player explicitly.
+  if (activeHls) {
+    activeHls.destroy();
+    activeHls = null;
   }
   activePlayingId = item.id;
   if (rowBtn) {
@@ -566,27 +636,16 @@ async function playMedia(item, rowBtn) {
   playerContainer.innerHTML = "";
 
   if (probe.status === 415) {
-    const msg = document.createElement("p");
-    msg.className = "player-message";
-    msg.textContent = "This file's video format can't be played in the browser. ";
-    const link = document.createElement("a");
     // ?original=1 bypasses the same compatibility check that just 415'd --
     // without it this link would 415 too, since it hits the same endpoint.
-    link.href = `${streamUrl}?original=1`;
-    link.textContent = "Download it instead";
-    link.download = "";
-    msg.appendChild(link);
-    playerContainer.appendChild(msg);
-    announce("This file's video format can't be played in the browser. A download link is available.");
+    showPlayerMessage("This file's video format can't be played in the browser. ", {
+      downloadUrl: `${streamUrl}?original=1`,
+    });
     return;
   }
 
   if (!probe.ok) {
-    const msg = document.createElement("p");
-    msg.className = "player-message";
-    msg.textContent = "Couldn't prepare this file for playback. Please try again.";
-    playerContainer.appendChild(msg);
-    announce(msg.textContent);
+    showPlayerMessage("Couldn't prepare this file for playback. Please try again.");
     return;
   }
 
@@ -598,11 +657,7 @@ async function playMedia(item, rowBtn) {
     const body = await probe.json().catch(() => null);
     hlsPlaylistUrl = body && body.hls_playlist;
     if (!hlsPlaylistUrl) {
-      const msg = document.createElement("p");
-      msg.className = "player-message";
-      msg.textContent = "Couldn't prepare this file for playback. Please try again.";
-      playerContainer.appendChild(msg);
-      announce(msg.textContent);
+      showPlayerMessage("Couldn't prepare this file for playback. Please try again.");
       return;
     }
   }
@@ -646,6 +701,18 @@ async function playMedia(item, rowBtn) {
 
   playerContainer.appendChild(el);
 
+  // Overlaid on the media element itself (#player-container's existing
+  // `position: sticky` already establishes the containing block for this)
+  // rather than a separate button below it, so it reads as part of the
+  // player rather than a generic page control.
+  const closePlayerBtn = document.createElement("button");
+  closePlayerBtn.type = "button";
+  closePlayerBtn.className = "dismiss-btn dismiss-btn-overlay";
+  closePlayerBtn.setAttribute("aria-label", "Close player");
+  closePlayerBtn.textContent = "×";
+  closePlayerBtn.addEventListener("click", () => stopPlayer());
+  playerContainer.appendChild(closePlayerBtn);
+
   if (hlsPlaylistUrl) {
     // hls.js first, native canPlayType() second -- the order matters and
     // is the one hls.js's own docs prescribe. Chromium 149 answers "maybe"
@@ -656,25 +723,21 @@ async function playMedia(item, rowBtn) {
     // either branch: macOS has MSE so hls.js runs, and iOS -- where hls.js
     // can't run at all -- falls through to its genuinely-native support.
     if (window.Hls && window.Hls.isSupported()) {
-      const hls = new Hls();
-      hls.on(Hls.Events.ERROR, (event, data) => {
+      activeHls = new Hls();
+      activeHls.on(Hls.Events.ERROR, (event, data) => {
         if (!data.fatal) return;
-        hls.destroy();
+        activeHls.destroy();
+        activeHls = null;
         showPlaybackError(item, "Playback failed and couldn't recover.");
       });
-      hls.loadSource(hlsPlaylistUrl);
-      hls.attachMedia(el);
+      activeHls.loadSource(hlsPlaylistUrl);
+      activeHls.attachMedia(el);
     } else if (el.canPlayType("application/vnd.apple.mpegurl")) {
       // iOS Safari: no MSE, so hls.js can't run -- but HLS support is
       // native in <video> there.
       el.src = hlsPlaylistUrl;
     } else {
-      playerContainer.innerHTML = "";
-      const msg = document.createElement("p");
-      msg.className = "player-message";
-      msg.textContent = "This browser can't play this file's format.";
-      playerContainer.appendChild(msg);
-      announce(msg.textContent);
+      showPlayerMessage("This browser can't play this file's format.");
       return;
     }
   }

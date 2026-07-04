@@ -324,7 +324,16 @@ main {
   color: #9aa0aa;
 }
 
+/* A closed <details> only renders its <summary> child -- the close button
+   has to live inside it (see index.html) for it to be reachable at all
+   while collapsed, not floated over the box as a sibling. flex keeps the
+   marker/text on the left and the button pinned to the right without
+   fighting the native disclosure triangle's own layout. */
 .scan-diagnostics summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
   cursor: pointer;
   color: #e6e6e6;
 }
@@ -382,10 +391,59 @@ main {
   border: 1px solid #2a2e35;
   border-radius: 8px;
   color: #9aa0aa;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
 }
 
 .player-message a {
   color: #7aa2f7;
+}
+
+/* Small "×" dismiss button shared by player messages and the scan
+   diagnostics summary -- both sit inline within a bordered, single-color
+   box, so a plain transparent button with the existing button:hover
+   treatment reads fine. .dismiss-btn-overlay below overrides this for the
+   very different (arbitrary video content) background it sits over. */
+.dismiss-btn {
+  flex-shrink: 0;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 1px solid #3a3f47;
+  border-radius: 6px;
+  background: transparent;
+  color: #9aa0aa;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dismiss-btn:hover {
+  background: #2c3038;
+  color: #e6e6e6;
+}
+
+/* Floats the close button over the top-right corner of the active
+   video/audio element. #player-container's existing `position: sticky`
+   already establishes the containing block for this -- no wrapper needed. */
+.dismiss-btn-overlay {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 50%;
+  background: rgba(20, 22, 26, 0.65);
+  color: #e6e6e6;
+  font-size: 1.3rem;
+  backdrop-filter: blur(2px);
+}
+
+.dismiss-btn-overlay:hover {
+  background: rgba(20, 22, 26, 0.85);
 }
 
 ul#media-list {
