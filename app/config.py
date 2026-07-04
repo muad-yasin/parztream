@@ -44,11 +44,28 @@ CACHE_MAX_BYTES = _parse_int_env("PARZTREAM_CACHE_MAX_BYTES", None)
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".m4b", ".ogg", ".wav", ".aac"}
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm"}
 
-# .m4b (audiobook chapters) uses the same MPEG-4 container as .m4a, but
-# Python's mimetypes registry doesn't know the extension, so without this
-# streaming would fall back to application/octet-stream and browsers
-# wouldn't know how to play it.
-mimetypes.add_type("audio/mp4", ".m4b")
+# mimetypes.guess_type() consults platform tables (the Windows registry,
+# /etc/mime.types on Linux), so what it knows varies machine to machine:
+# .m4b is unknown everywhere, and .mkv resolves fine on Linux but came
+# back unknown on a clean Windows install (caught by the first Windows CI
+# run: streaming served application/octet-stream there, which browsers
+# won't play). Register every extension we serve explicitly so the answer
+# is deterministic on all platforms.
+for _ext, _mime in {
+    ".mp3": "audio/mpeg",
+    ".flac": "audio/flac",
+    ".m4a": "audio/mp4",
+    ".m4b": "audio/mp4",  # audiobook chapters, same MPEG-4 container as .m4a
+    ".ogg": "audio/ogg",
+    ".wav": "audio/x-wav",
+    ".aac": "audio/aac",
+    ".mp4": "video/mp4",
+    ".mkv": "video/x-matroska",
+    ".avi": "video/x-msvideo",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+}.items():
+    mimetypes.add_type(_mime, _ext)
 
 # A 4-digit PIN rather than an arbitrary password -- faster to type on a
 # phone/TV remote for a home-LAN tool where the realistic threat model is
