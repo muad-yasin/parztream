@@ -222,7 +222,7 @@ want to configure it another way (e.g. for the service setups below).
 | `PARZTREAM_SECRET_KEY` | Signs session cookies. If unset, a random key is generated on every restart, meaning everyone's logged out each time. Set a fixed value (`python3 -c "import secrets; print(secrets.token_hex(32))"`) to keep people logged in across restarts. | random per-restart |
 | `PARZTREAM_CACHE_DIR` | Where repackaged videos and video thumbnails are cached. | `cache/` |
 | `PARZTREAM_CACHE_MAX_BYTES` | Caps the cache folder's total size — oldest files are deleted once a new one pushes it over the limit. An evicted file just gets cheaply re-derived next time it's played. | unset (no limit) |
-| `PARZTREAM_ENABLE_TRANSCODE` | Enables real video re-encoding for videos whose codec itself can't play in a browser (e.g. HEVC), using a detected hardware encoder or a software fallback. Off by default; those files fall back to download-only. See [Real video transcoding](#real-video-transcoding). | unset (off) |
+| `PARZTREAM_ENABLE_TRANSCODE` | Controls real video re-encoding for videos whose codec itself can't play in a browser (e.g. HEVC). `1`/`true`/`yes` always turns it on; `0`/`false`/`no` always turns it off; unset/empty/`auto` (the default) automatically enables it only if a real hardware encoder is detected and benchmarks fast enough for real-time playback. See [Real video transcoding](#real-video-transcoding). | unset (auto-detect) |
 | `PARZTREAM_MAX_CONCURRENT_TRANSCODES` | Caps how many videos can be re-encoded at once (separate from the existing per-video job dedup). | `1` |
 | `PARZTREAM_MDNS_ENABLED` | Set to `false` to turn off the `parztream.local` network announcement. | `true` |
 | `PARZTREAM_MDNS_HOSTNAME` | Name advertised on the network. Change this if running more than one instance on the same LAN. | `parztream` |
@@ -240,26 +240,40 @@ to "fix" by following symlinks.
 ## Real video transcoding
 
 By default, a video whose codec itself can't be decoded by a browser
-(HEVC being the common case) can only be downloaded, not played
-in-browser — parztream never re-encodes video unless you explicitly
-turn it on with `PARZTREAM_ENABLE_TRANSCODE=1`, because unlike the
-container/audio-only fixing it always does, a real re-encode is
-genuinely CPU/GPU-intensive. Given parztream's realistic hardware
-range (NAS boxes, old laptops, Raspberry Pi via the Linux build), that
-cost has to be opt-in, not assumed safe for everyone.
+(HEVC being the common case) is handled based on `PARZTREAM_ENABLE_TRANSCODE`,
+which has three modes:
 
-When enabled, parztream tries a hardware encoder first (Intel Quick
-Sync, NVIDIA NVENC, AMD AMF/VCE, VAAPI, or Apple VideoToolbox,
-depending on platform), verified with a real test encode the first
-time it's needed, not just assumed from what ffmpeg claims to
-support — a hardware encoder can be compiled in but still fail at
-runtime with no GPU present or a missing driver. If no hardware
-encoder works, it falls back to `libopenh264` (a software H.264
-encoder). Re-encoded video is always capped at 1080p (downscaled,
-never upscaled) to bound worst-case cost regardless of source
-resolution, and `PARZTREAM_MAX_CONCURRENT_TRANSCODES` (default `1`)
-limits how many videos can be re-encoding at once so one weak CPU/GPU
-doesn't get asked to do several at the same time.
+- **Auto-detect (the default, unset or `auto`).** The first time such a
+  file is actually played, parztream checks for a real hardware encoder
+  (Intel Quick Sync, NVIDIA NVENC, AMD AMF/VCE, VAAPI, or Apple
+  VideoToolbox, depending on platform) and benchmarks it against a
+  representative clip. If it encodes comfortably faster than real time,
+  transcoding turns itself on automatically — no configuration needed. If
+  no hardware encoder is found, or the one found isn't fast enough, the
+  file falls back to download-only, exactly as if transcoding were off.
+  The software-only fallback (`libopenh264`) is deliberately **never**
+  auto-enabled, however fast it benchmarks — it's pure CPU load with no
+  hardware offload, which is exactly the risk this auto-detection exists
+  to protect weaker hardware (NAS boxes, old laptops, Raspberry Pi via the
+  Linux build) from.
+- **Always on (`1`/`true`/`yes`).** Skips the speed benchmark entirely —
+  if *any* working encoder is found (hardware or the software fallback),
+  it's used, exactly like this project's original opt-in-only behavior
+  before auto-detection existed. Use this if you know your hardware can
+  keep up (including a software-only setup) and don't want the benchmark's
+  speed threshold to potentially decide against it.
+- **Always off (`0`/`false`/`no`).** Guarantees the old default: those
+  files always fall back to download-only, and nothing in
+  `app/encoder_detect.py` is ever even called.
+
+Once transcoding is happening (auto-detected or forced on), parztream
+verifies the chosen encoder with a real test encode, not just what ffmpeg
+claims to support — a hardware encoder can be compiled in but still fail
+at runtime with no GPU present or a missing driver. Re-encoded video is
+always capped at 1080p (downscaled, never upscaled) to bound worst-case
+cost regardless of source resolution, and `PARZTREAM_MAX_CONCURRENT_TRANSCODES`
+(default `1`) limits how many videos can be re-encoding at once so one
+weak CPU/GPU doesn't get asked to do several at the same time.
 
 **Why `libopenh264`, not `libx264`:** the vendored ffmpeg for the
 Windows/Linux builds is deliberately LGPL-licensed (see below), which
@@ -279,8 +293,14 @@ available at all, so only "candidate compiled in but fails at
 runtime" and "falls through to software" have actually been
 exercised. Likewise, the exact set of encoders compiled into the real
 vendored BtbN binaries (as opposed to a generic system ffmpeg) hasn't
-been spot-checked. If you enable this and a hardware encoder you
-expect to work isn't being picked up, that's the first place to look.
+been spot-checked. The auto-detection speed benchmark inherits this
+exact same caveat — it's logic-tested (mocked encode timings), never
+run against a real GPU, so its 2x-real-time threshold hasn't been
+validated against actual hardware encoder throughput. If you enable
+this and a hardware encoder you expect to work isn't being picked up
+(or auto-detection didn't turn transcoding on when you expected it
+to), check the server logs for a "Transcode auto-detection: ..." line
+explaining what was measured, and that's the first place to look.
 
 ## Running as a background service
 

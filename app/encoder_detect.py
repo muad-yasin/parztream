@@ -3,6 +3,7 @@ import logging
 import subprocess
 import sys
 import threading
+import time
 
 logger = logging.getLogger("parztream")
 
@@ -172,3 +173,106 @@ def _try_encode(name: str) -> bool:
     except (FileNotFoundError, subprocess.SubprocessError):
         return False
     return result.returncode == 0
+
+
+# Real-time factor an encoder must clear to auto-enable (config.TRANSCODE_MODE
+# == "auto") -- deliberately well above 1.0x. A live HLS segment job has real
+# overhead beyond pure encode throughput that a bare-1.0x benchmark leaves no
+# room for at all: segment muxing, a viewer seeking mid-stream (a second job
+# spun up alongside the first), another device's thumbnail/remux work
+# competing for the same CPU/GPU. This is a starting judgment call, not a
+# measured constant -- kept as a plain module constant rather than a new env
+# var until there's a concrete reason to tune it (see CLAUDE.md's "don't add
+# config just in case" convention).
+MIN_REALTIME_FACTOR = 2.0
+
+# 1080p, since app/transcode.py's _scale_args already caps real re-encodes at
+# 1080p and never upscales -- benchmarking near the real ceiling a re-encode
+# job would actually hit, not the trivial 64x64 existence-check size
+# _try_encode uses (that one only proves the encoder *works*, not that it's
+# *fast enough*).
+_BENCHMARK_WIDTH = 1920
+_BENCHMARK_HEIGHT = 1080
+_BENCHMARK_CLIP_SECONDS = 3
+# Generous but bounded: a hung driver during the benchmark must not hang the
+# first real playback request indefinitely. Real hardware encoding 3 seconds
+# of 1080p should finish in a small fraction of this on anything that could
+# plausibly pass the MIN_REALTIME_FACTOR bar at all.
+_BENCHMARK_TIMEOUT = 30
+
+_UNSET_CAPABLE = object()
+_auto_capable = _UNSET_CAPABLE
+_capable_lock = threading.Lock()
+
+
+def _measure_encode_seconds(pre_input_args, video_args):
+    """Runs the benchmark encode and returns the wall-clock seconds it took,
+    or None if it failed/timed out. Factored out as its own function
+    specifically so tests can monkeypatch it to return an instant fake
+    duration -- same seam pattern this module already uses for _try_encode/
+    _list_encoders -- rather than actually spending _BENCHMARK_CLIP_SECONDS
+    of real wall-clock time (or more) in the unit suite."""
+    start = time.monotonic()
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-v", "error",
+                *pre_input_args,
+                "-f", "lavfi", "-i",
+                f"color=c=black:size={_BENCHMARK_WIDTH}x{_BENCHMARK_HEIGHT}:rate=30:duration={_BENCHMARK_CLIP_SECONDS}",
+                *video_args,
+                "-f", "null", "-",
+            ],
+            capture_output=True, timeout=_BENCHMARK_TIMEOUT,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return time.monotonic() - start
+
+
+def is_hardware_transcode_capable() -> bool:
+    """True if a real hardware encoder (never the libopenh264 software
+    fallback -- see MIN_REALTIME_FACTOR's docstring for why) was detected on
+    this machine AND benchmarks fast enough for real-time HLS re-encoding.
+    Cached for the life of the process, same double-checked-locking pattern
+    as get_encoder() (whose own cache this reuses -- no re-probing for
+    existence, only the new speed benchmark is added on top)."""
+    global _auto_capable
+    if _auto_capable is not _UNSET_CAPABLE:
+        return _auto_capable
+    with _capable_lock:
+        if _auto_capable is _UNSET_CAPABLE:
+            _auto_capable = _check_capable()
+        return _auto_capable
+
+
+def _check_capable() -> bool:
+    encoder = get_encoder()
+    if encoder is None or encoder == SOFTWARE_FALLBACK:
+        return False
+
+    pre_input_args, video_args = encode_video_args(encoder, None, None)
+    if pre_input_args is None:
+        return False  # shouldn't happen -- get_encoder() already confirmed this candidate works
+
+    elapsed = _measure_encode_seconds(pre_input_args, video_args)
+    if elapsed is None or elapsed <= 0:
+        logger.info("Transcode auto-detection: %s benchmark failed or timed out -- leaving transcoding disabled", encoder)
+        return False
+
+    factor = _BENCHMARK_CLIP_SECONDS / elapsed
+    capable = factor >= MIN_REALTIME_FACTOR
+    if capable:
+        logger.info(
+            "Transcode auto-detection: %s encodes at %.1fx real-time -- enabling automatic transcoding",
+            encoder, factor,
+        )
+    else:
+        logger.info(
+            "Transcode auto-detection: %s only encodes at %.1fx real-time (need >= %.1fx) -- "
+            "leaving transcoding disabled; set PARZTREAM_ENABLE_TRANSCODE=1 to force it anyway",
+            encoder, factor, MIN_REALTIME_FACTOR,
+        )
+    return capable

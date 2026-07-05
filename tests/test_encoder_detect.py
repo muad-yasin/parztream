@@ -20,8 +20,10 @@ requires_vaapi_render_node = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 def reset_detection_cache():
     encoder_detect._detected_encoder = encoder_detect._UNSET
+    encoder_detect._auto_capable = encoder_detect._UNSET_CAPABLE
     yield
     encoder_detect._detected_encoder = encoder_detect._UNSET
+    encoder_detect._auto_capable = encoder_detect._UNSET_CAPABLE
 
 
 def test_first_working_candidate_wins_and_stops_trying_further_ones(monkeypatch):
@@ -241,3 +243,66 @@ def test_real_vaapi_probe_gets_past_pixel_format_negotiation():
         capture_output=True, text=True, timeout=10,
     )
     assert "Impossible to convert between the formats" not in result.stderr
+
+
+def test_capable_is_false_when_no_encoder_detected_at_all(monkeypatch):
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: None)
+    called = []
+    monkeypatch.setattr(encoder_detect, "_measure_encode_seconds", lambda *a: called.append(True))
+
+    assert encoder_detect.is_hardware_transcode_capable() is False
+    assert called == []  # never even attempts a benchmark with nothing to benchmark
+
+
+def test_capable_is_false_for_software_fallback_regardless_of_speed(monkeypatch):
+    # The core of decision 3: libopenh264 never auto-enables no matter how
+    # fast it benchmarks -- it's pure CPU load with no hardware offload.
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: encoder_detect.SOFTWARE_FALLBACK)
+    called = []
+    monkeypatch.setattr(encoder_detect, "_measure_encode_seconds", lambda *a: called.append(True))
+
+    assert encoder_detect.is_hardware_transcode_capable() is False
+    assert called == []  # never benchmarks the software fallback at all
+
+
+def test_capable_is_true_for_fast_hardware_encoder(monkeypatch):
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "h264_nvenc")
+    # Encodes _BENCHMARK_CLIP_SECONDS of content well within one second --
+    # comfortably above MIN_REALTIME_FACTOR.
+    monkeypatch.setattr(encoder_detect, "_measure_encode_seconds", lambda *a: 0.5)
+
+    assert encoder_detect.is_hardware_transcode_capable() is True
+
+
+def test_capable_is_false_for_too_slow_hardware_encoder(monkeypatch):
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "h264_vaapi")
+    monkeypatch.setattr(encoder_detect, "encode_video_args", lambda *a: (["-vaapi_device", "/dev/dri/renderD128"], ["-c:v", "h264_vaapi"]))
+    # Takes longer than real time to encode the clip -- well under
+    # MIN_REALTIME_FACTOR.
+    monkeypatch.setattr(encoder_detect, "_measure_encode_seconds", lambda *a: encoder_detect._BENCHMARK_CLIP_SECONDS * 2)
+
+    assert encoder_detect.is_hardware_transcode_capable() is False
+
+
+def test_capable_is_false_when_benchmark_fails_or_times_out(monkeypatch):
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "h264_nvenc")
+    monkeypatch.setattr(encoder_detect, "_measure_encode_seconds", lambda *a: None)
+
+    assert encoder_detect.is_hardware_transcode_capable() is False
+
+
+def test_capable_result_is_cached_benchmark_runs_once(monkeypatch):
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "h264_nvenc")
+    call_count = {"n": 0}
+
+    def fake_measure(*args):
+        call_count["n"] += 1
+        return 0.1
+
+    monkeypatch.setattr(encoder_detect, "_measure_encode_seconds", fake_measure)
+
+    first = encoder_detect.is_hardware_transcode_capable()
+    second = encoder_detect.is_hardware_transcode_capable()
+
+    assert first is second is True
+    assert call_count["n"] == 1

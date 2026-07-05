@@ -436,12 +436,21 @@ skipping) plus the e2e suite on Ubuntu.
   so a restart never leaves an orphaned ffmpeg running.
 
   **Video codec itself incompatible (e.g. HEVC) — real transcoding,
-  opt-in and off by default** (`config.TRANSCODE_ENABLED`,
-  `PARZTREAM_ENABLE_TRANSCODE`): when enabled, `resolve_playable_path`
-  checks `app/encoder_detect.py`'s `get_encoder()` before deciding —
-  if it finds a working encoder, `NeedsHlsRemux(reencode_video=True)`
-  is raised instead of `UnsupportedVideoCodec`, and `_start_job` swaps
-  `-c:v copy` for `-c:v <encoder> -vf scale=...` plus
+  gated by `config.TRANSCODE_MODE`** (`PARZTREAM_ENABLE_TRANSCODE`, a
+  tri-state: `"on"`/`"off"`/`"auto"`, default `"auto"`): in `"on"` mode,
+  `resolve_playable_path` checks `app/encoder_detect.py`'s `get_encoder()`
+  before deciding — if it finds a working encoder (hardware or the
+  software fallback), `NeedsHlsRemux(reencode_video=True)` is raised
+  instead of `UnsupportedVideoCodec`, exactly this project's original
+  opt-in-only behavior before auto-detection existed, never
+  second-guessed by a speed check. In `"auto"` mode (the default), the
+  same branch instead calls `encoder_detect.is_hardware_transcode_capable()`
+  — a *hardware* encoder must both be detected and benchmark fast enough
+  for real-time re-encoding before auto-enabling; the software fallback
+  never auto-enables regardless of benchmarked speed (see
+  `app/encoder_detect.py`, below). In `"off"` mode, neither function is
+  ever called. Once re-encoding is confirmed either way, `_start_job`
+  swaps `-c:v copy` for `-c:v <encoder> -vf scale=...` plus
   `-force_key_frames` at every segment boundary — the encoder must
   emit an IDR frame exactly where the muxer will cut so every
   re-encoded segment starts decodable, which stream-copy gets for free
@@ -449,11 +458,13 @@ skipping) plus the e2e suite on Ubuntu.
   which caps re-encodes at 1080p, never upscales, and is a no-op —
   same "don't guess" pattern as elsewhere — when `video_width`/
   `video_height` are unknown). This is deliberately gated behind both
-  a config flag AND actual runtime detection, never assumed: real
-  encoding is meaningfully CPU/GPU-intensive in a way stream-copy
-  never is, and parztream's realistic hardware (NAS boxes, old
-  laptops, Raspberry Pi) is exactly where that could make things
-  *worse* than today's download-link fallback if it ran unconditionally.
+  the mode AND actual runtime detection, never assumed: real encoding
+  is meaningfully CPU/GPU-intensive in a way stream-copy never is, and
+  parztream's realistic hardware (NAS boxes, old laptops, Raspberry
+  Pi) is exactly where that could make things *worse* than today's
+  download-link fallback if it ran unconditionally -- which is the
+  entire reason `"auto"` mode benchmarks before enabling, rather than
+  just checking whether *any* encoder exists the way `"on"` mode does.
   A `threading.Semaphore(config.MAX_CONCURRENT_TRANSCODES)` (default 1)
   caps concurrent re-encode jobs specifically — stream-copy jobs never
   touch it, staying as cheap and uncapped as before. That semaphore is
@@ -496,6 +507,42 @@ skipping) plus the e2e suite on Ubuntu.
   available), and the real vendored BtbN binaries' actual encoder
   inventory hasn't been spot-checked against what this module assumes
   — flag this if you touch it, don't quietly treat it as confirmed.
+
+  **`is_hardware_transcode_capable()`** — the auto-detection layer on top
+  of `get_encoder()`, used only by `config.TRANSCODE_MODE == "auto"`
+  (`app/transcode.py`). `get_encoder()` only proves an encoder *works* (a
+  trivial 64×64, 1-frame synthetic encode, pass/fail on `returncode`) —
+  this proves it's *fast enough*, by benchmarking a representative 1080p,
+  3-second synthetic clip (`_measure_encode_seconds`, built via the same
+  `encode_video_args()` a real segment job uses, so the benchmark measures
+  the identical ffmpeg command shape) and requiring `MIN_REALTIME_FACTOR`
+  (2.0×, a starting judgment call, not a measured constant — a live HLS
+  segment job has real overhead beyond pure encode throughput that a bare
+  1.0× benchmark leaves no room for at all: segment muxing, a concurrent
+  seek spinning up a second job, another device's thumbnail work). Returns
+  `False` immediately, without ever spawning a benchmark subprocess, when
+  `get_encoder()` found nothing or found only `SOFTWARE_FALLBACK` —
+  software encoding never auto-enables regardless of how fast it
+  benchmarks, since it's pure CPU load with no hardware offload, exactly
+  the resource-exhaustion risk (NAS boxes, old laptops, Raspberry Pi) this
+  whole feature exists to protect against; it stays available only via
+  explicit `"on"` mode. Cached for the process lifetime with the same
+  double-checked-locking pattern as `get_encoder()` (a separate lock/
+  sentinel — reuses `get_encoder()`'s own cache rather than re-probing
+  existence). Same lazy timing as `get_encoder()` and for the same reason
+  (`app/transcode.py`'s `needs_segment_boundaries` deliberately treats
+  `"auto"` the same as `"off"`, so a scan can never trigger this
+  benchmark either — see that function's docstring). Logs its outcome via
+  `logger.info` the first time it runs (visible in server logs whenever
+  the first incompatible file is actually played, not at startup, since
+  there's no equivalent of `app/main.py`'s `AUTH_PIN`/`SECRET_KEY`
+  startup-warning pattern here — that's intentional, not an oversight).
+  **Unverified, same caveat as `get_encoder()` above**: this benchmark has
+  only ever been exercised with mocked encode timings (no GPU available
+  in this project's dev environment), so `MIN_REALTIME_FACTOR`'s 2.0×
+  threshold hasn't been validated against real hardware-encoder
+  throughput — flag this if you touch it or tune the threshold, don't
+  quietly treat it as confirmed.
 - `app/auth.py` — `SessionAuthMiddleware`, a pure ASGI middleware (not
   `BaseHTTPMiddleware`, which buffers `StreamingResponse` bodies —
   that would hurt streaming large files). Replaced `BasicAuthMiddleware`

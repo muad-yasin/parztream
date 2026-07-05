@@ -157,10 +157,11 @@ class NeedsHlsRemux(Exception):
     app/routers/stream.py) should route to the HLS playlist/segment
     endpoints -- build_playlist()/ensure_segment() -- instead of treating
     this row as a plain streamable file. reencode_video is True only when
-    the video codec itself is incompatible AND config.TRANSCODE_ENABLED AND
-    a working encoder was detected (see resolve_playable_path) -- otherwise
-    that case still raises UnsupportedVideoCodec exactly as before this
-    existed."""
+    the video codec itself is incompatible AND config.TRANSCODE_MODE allows
+    it (either "on", or "auto" with a hardware encoder that benchmarks fast
+    enough -- see resolve_playable_path and app/encoder_detect.py) --
+    otherwise that case still raises UnsupportedVideoCodec exactly as
+    before either of these existed."""
 
     def __init__(self, remux_audio: bool, reencode_video: bool = False):
         self.remux_audio = remux_audio
@@ -218,17 +219,31 @@ def resolve_playable_path(row) -> Path:
         return path
 
     if not video_ok:
-        # Real re-encoding is opt-in (config.TRANSCODE_ENABLED, off by
-        # default) and only attempted if a working encoder was actually
-        # detected on this machine -- when either isn't true, this stays
-        # exactly today's dead end (download-only), never a slow/broken
-        # attempt at a codec this box genuinely can't encode. Short-circuit
-        # evaluation means get_encoder() is never even called (no probing
-        # subprocesses spawned) when transcoding isn't enabled at all.
-        if config.TRANSCODE_ENABLED:
+        # Real re-encoding has three modes (config.TRANSCODE_MODE -- see its
+        # definition in app/config.py for the full reasoning):
+        #   "on"   -- always attempt it if any working encoder is detected
+        #             (hardware or the libopenh264 software fallback),
+        #             exactly this project's original opt-in-only behavior.
+        #   "auto" -- only attempt it if a *hardware* encoder is detected
+        #             AND benchmarks fast enough for real-time HLS
+        #             re-encoding (encoder_detect.is_hardware_transcode_capable) --
+        #             software encoding never auto-enables regardless of
+        #             speed, see that function's docstring for why.
+        #   "off"  -- never call app/encoder_detect.py at all (no probing
+        #             subprocesses spawned) -- exactly today's dead end
+        #             (download-only), unchanged from before auto-detection
+        #             existed.
+        # Either way this never guesses: a codec this box genuinely can't
+        # (or, in "auto", isn't fast enough to) encode stays a clean
+        # UnsupportedVideoCodec, never a slow/broken re-encode attempt.
+        if config.TRANSCODE_MODE == "on":
             if encoder_detect.get_encoder() is not None:
                 raise NeedsHlsRemux(remux_audio=not audio_ok, reencode_video=True)
             raise UnsupportedVideoCodec(video_codec, transcode_enabled=True)
+        if config.TRANSCODE_MODE == "auto":
+            if encoder_detect.is_hardware_transcode_capable():
+                raise NeedsHlsRemux(remux_audio=not audio_ok, reencode_video=True)
+            raise UnsupportedVideoCodec(video_codec, transcode_enabled=False)
         raise UnsupportedVideoCodec(video_codec, transcode_enabled=False)
 
     # video_ok is True here, but the container isn't -- only a codec this
@@ -271,19 +286,21 @@ def needs_segment_boundaries(path: Path, video_codec, audio_codec, audio_channel
     """Whether this video would route through the HLS path at all, i.e.
     whether paying the (packet-walk-priced, see app/scanner.py's
     probe_keyframes) cost of extracting its keyframe boundaries at scan
-    time is worth anything. Mirrors resolve_playable_path's routing with
-    one deliberate difference: the re-encode branch checks only
-    config.TRANSCODE_ENABLED, never encoder_detect.get_encoder() --
-    encoder detection spawns probing subprocesses and is deliberately lazy
-    (first real transcode request, see app/encoder_detect.py), and a scan
-    must not be the thing that triggers it. Worst case of that shortcut is
-    one wasted keyframe walk for a file that later turns out to have no
-    working encoder anyway. Direct-play files and files with no working
-    HLS route (vp9/av1 in the wrong container, incompatible codec with
-    transcoding off) return False -- boundaries for those would never be
-    read. A file this returns False for that later *does* need them (e.g.
-    the user turns transcoding on) is covered by the lazy backfill in
-    app/routers/stream.py, same as legacy rows."""
+    time is worth anything. Mirrors resolve_playable_path's routing with one
+    deliberate difference: the re-encode branch only ever returns True for
+    config.TRANSCODE_MODE == "on", never "auto" (even though "auto" might
+    end up enabling re-encoding too) -- both encoder_detect.get_encoder()
+    and is_hardware_transcode_capable() spawn probing subprocesses and are
+    deliberately lazy (first real transcode request, see
+    app/encoder_detect.py), and a scan must not be the thing that triggers
+    either. Worst case of treating "auto" like "off" here is one wasted
+    keyframe walk skipped for a file that later turns out to auto-enable
+    re-encoding anyway -- covered by the *existing* lazy backfill in
+    app/routers/stream.py (same path legacy rows already rely on), just
+    paid on that file's first real HLS request instead of at scan time.
+    Direct-play files and files with no working HLS route (vp9/av1 in the
+    wrong container, incompatible codec with transcoding off/not-yet-known)
+    return False -- boundaries for those would never be read."""
     if video_codec is None:
         return False
     video_ok = video_codec.lower() in COMPATIBLE_VIDEO_CODECS
@@ -295,7 +312,7 @@ def needs_segment_boundaries(path: Path, video_codec, audio_codec, audio_channel
     if video_ok and audio_ok and container_ok:
         return False
     if not video_ok:
-        return config.TRANSCODE_ENABLED
+        return config.TRANSCODE_MODE == "on"
     return video_codec.lower() in TS_SAFE_VIDEO_CODECS
 
 
@@ -968,8 +985,9 @@ def _start_job(
     pre_input_args = []
     if reencode_video:
         # Only reached when resolve_playable_path already confirmed
-        # config.TRANSCODE_ENABLED and a working encoder -- get_encoder()
-        # is cached, this doesn't re-probe. encode_video_args also wires up
+        # config.TRANSCODE_MODE allows re-encoding and a working (and, for
+        # "auto", fast-enough) encoder -- get_encoder() is cached, this
+        # doesn't re-probe. encode_video_args also wires up
         # whatever hwupload/device plumbing this specific encoder needs
         # (see app/encoder_detect.py) -- VAAPI/QSV can't just take -c:v on
         # its own the way stream-copy or NVENC/software can.

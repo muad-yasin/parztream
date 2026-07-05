@@ -119,16 +119,44 @@ TRUSTED_HOSTS = {
     h.strip().lower() for h in os.environ.get("PARZTREAM_TRUSTED_HOSTS", "").split(",") if h.strip()
 }
 
-# Enables real video re-encoding (not just container/audio remuxing) for
+# Controls real video re-encoding (not just container/audio remuxing) for
 # videos whose video codec itself can't be played in a browser (e.g. HEVC)
-# -- see app/transcode.py and app/encoder_detect.py. Off by default: even
-# with a detected hardware encoder, this is meaningfully more CPU/GPU-
-# intensive than the existing stream-copy remux path, and the only software
-# encoder guaranteed present in the vendored ffmpeg (libopenh264, chosen for
-# LGPL licensing -- see ADVANCED.md) is noticeably lower quality-per-bit
-# than libx264. When unset, UnsupportedVideoCodec -> download-only behavior
-# is completely unchanged, and app/encoder_detect.py is never even called.
-TRANSCODE_ENABLED = os.environ.get("PARZTREAM_ENABLE_TRANSCODE", "").lower() in ("1", "true", "yes")
+# -- see app/transcode.py and app/encoder_detect.py. Three modes:
+#   "on"   -- PARZTREAM_ENABLE_TRANSCODE=1/true/yes. Always attempt a
+#             re-encode if any working encoder is detected (hardware or the
+#             libopenh264 software fallback), exactly like this project's
+#             original opt-in-only behavior -- no speed benchmark, since an
+#             explicit choice here should never be second-guessed.
+#   "off"  -- =0/false/no. Never even calls app/encoder_detect.py --
+#             UnsupportedVideoCodec -> download-only behavior, unchanged
+#             from before auto-detection existed. The escape hatch for
+#             anyone who wants a guaranteed-disabled server.
+#   "auto" -- unset, empty, or literal "auto" (the default). Lazily
+#             benchmarks (see encoder_detect.is_hardware_transcode_capable)
+#             the *first* real hardware encoder detected, on the first file
+#             that actually needs one, and only auto-enables if it's fast
+#             enough for real-time HLS re-encoding. The libopenh264 software
+#             fallback never auto-enables regardless of benchmarked speed --
+#             it's pure CPU load with no hardware offload, exactly the
+#             resource-exhaustion risk (NAS boxes, old laptops, Raspberry
+#             Pi) this whole feature exists to protect weak hardware from.
+# A mistyped value (e.g. "tur") fails loudly rather than silently landing in
+# "auto" -- unlike a bad default, "auto" now has a real consequence (it can
+# spawn genuine transcode jobs), so it deserves the same treatment
+# _parse_int_env already gives a bad PARZTREAM_PORT above.
+_TRANSCODE_MODE_RAW = os.environ.get("PARZTREAM_ENABLE_TRANSCODE", "").strip().lower()
+if _TRANSCODE_MODE_RAW in ("1", "true", "yes"):
+    TRANSCODE_MODE = "on"
+elif _TRANSCODE_MODE_RAW in ("0", "false", "no"):
+    TRANSCODE_MODE = "off"
+elif _TRANSCODE_MODE_RAW in ("", "auto"):
+    TRANSCODE_MODE = "auto"
+else:
+    raise SystemExit(
+        f"PARZTREAM_ENABLE_TRANSCODE={_TRANSCODE_MODE_RAW!r} isn't a recognized value -- "
+        "use 1/true/yes (always on), 0/false/no (always off), or auto/unset "
+        "(detect hardware capability and decide automatically)."
+    )
 
 # Caps how many *re-encoding* (not stream-copy remux) HLS jobs run at once,
 # system-wide -- separate from app/transcode.py's existing per-media job

@@ -1332,8 +1332,8 @@ def test_terminate_all_jobs_stops_still_running_processes(tmp_path, monkeypatch)
     assert terminated.is_set()
 
 
-def test_incompatible_codec_with_transcode_disabled_raises_unsupported(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "TRANSCODE_ENABLED", False)
+def test_incompatible_codec_with_transcode_off_raises_unsupported(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "TRANSCODE_MODE", "off")
     f = tmp_path / "clip.mkv"
     f.write_bytes(b"x")
     row = _row(path=str(f), video_codec="hevc", audio_codec="aac")
@@ -1347,8 +1347,8 @@ def test_incompatible_codec_with_transcode_disabled_raises_unsupported(tmp_path,
     assert "PARZTREAM_ENABLE_TRANSCODE" in exc_info.value.user_message()
 
 
-def test_incompatible_codec_with_transcode_enabled_but_no_encoder_raises_unsupported(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "TRANSCODE_ENABLED", True)
+def test_incompatible_codec_with_transcode_on_but_no_encoder_raises_unsupported(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "TRANSCODE_MODE", "on")
     monkeypatch.setattr(encoder_detect, "get_encoder", lambda: None)
     f = tmp_path / "clip.mkv"
     f.write_bytes(b"x")
@@ -1364,8 +1364,8 @@ def test_incompatible_codec_with_transcode_enabled_but_no_encoder_raises_unsuppo
     assert "no working" in message
 
 
-def test_incompatible_codec_with_transcode_enabled_and_encoder_found_needs_hls_remux(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "TRANSCODE_ENABLED", True)
+def test_incompatible_codec_with_transcode_on_and_encoder_found_needs_hls_remux(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "TRANSCODE_MODE", "on")
     monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "libopenh264")
     f = tmp_path / "clip.mkv"
     f.write_bytes(b"x")
@@ -1377,11 +1377,11 @@ def test_incompatible_codec_with_transcode_enabled_and_encoder_found_needs_hls_r
     assert exc_info.value.remux_audio is True  # ac3 is also incompatible
 
 
-def test_transcode_disabled_never_calls_encoder_detection(tmp_path, monkeypatch):
-    # Proves the flag short-circuits before encoder_detect is even touched
+def test_transcode_off_never_calls_encoder_detection(tmp_path, monkeypatch):
+    # Proves the mode short-circuits before encoder_detect is even touched
     # -- zero new code runs when the feature is off, exactly today's
     # behavior.
-    monkeypatch.setattr(config, "TRANSCODE_ENABLED", False)
+    monkeypatch.setattr(config, "TRANSCODE_MODE", "off")
     called = []
     monkeypatch.setattr(encoder_detect, "get_encoder", lambda: called.append(True))
     f = tmp_path / "clip.mkv"
@@ -1391,6 +1391,84 @@ def test_transcode_disabled_never_calls_encoder_detection(tmp_path, monkeypatch)
     with pytest.raises(transcode.UnsupportedVideoCodec):
         transcode.resolve_playable_path(row)
     assert called == []
+
+
+def test_transcode_on_never_calls_capability_benchmark(tmp_path, monkeypatch):
+    # "on" is an explicit, unconditional opt-in -- it must never be
+    # second-guessed by the auto-detection benchmark, only the plain
+    # existence check "on" always used before auto-detection existed.
+    monkeypatch.setattr(config, "TRANSCODE_MODE", "on")
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "libopenh264")
+    called = []
+    monkeypatch.setattr(encoder_detect, "is_hardware_transcode_capable", lambda: called.append(True))
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"x")
+    row = _row(path=str(f), video_codec="hevc", audio_codec="aac")
+
+    with pytest.raises(transcode.NeedsHlsRemux):
+        transcode.resolve_playable_path(row)
+    assert called == []
+
+
+def test_incompatible_codec_with_transcode_auto_and_capable_hardware_needs_hls_remux(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "TRANSCODE_MODE", "auto")
+    monkeypatch.setattr(encoder_detect, "is_hardware_transcode_capable", lambda: True)
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"x")
+    row = _row(path=str(f), video_codec="hevc", audio_codec="ac3")
+
+    with pytest.raises(transcode.NeedsHlsRemux) as exc_info:
+        transcode.resolve_playable_path(row)
+    assert exc_info.value.reencode_video is True
+    assert exc_info.value.remux_audio is True
+
+
+def test_incompatible_codec_with_transcode_auto_and_incapable_hardware_raises_unsupported(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "TRANSCODE_MODE", "auto")
+    monkeypatch.setattr(encoder_detect, "is_hardware_transcode_capable", lambda: False)
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"x")
+    row = _row(path=str(f), video_codec="hevc", audio_codec="aac")
+
+    with pytest.raises(transcode.UnsupportedVideoCodec) as exc_info:
+        transcode.resolve_playable_path(row)
+    assert exc_info.value.transcode_enabled is False
+
+
+def test_transcode_auto_never_calls_plain_get_encoder(tmp_path, monkeypatch):
+    # "auto" must route entirely through is_hardware_transcode_capable(),
+    # never the plain existence-only get_encoder() -- otherwise a slow
+    # hardware encoder (or the software fallback) could get auto-enabled
+    # without ever being benchmarked.
+    monkeypatch.setattr(config, "TRANSCODE_MODE", "auto")
+    monkeypatch.setattr(encoder_detect, "is_hardware_transcode_capable", lambda: False)
+    called = []
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: called.append(True))
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"x")
+    row = _row(path=str(f), video_codec="hevc", audio_codec="aac")
+
+    with pytest.raises(transcode.UnsupportedVideoCodec):
+        transcode.resolve_playable_path(row)
+    assert called == []
+
+
+def test_needs_segment_boundaries_true_for_reencode_when_mode_on(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCODE_MODE", "on")
+    assert transcode.needs_segment_boundaries(Path("clip.mkv"), "hevc", "aac", 2) is True
+
+
+def test_needs_segment_boundaries_false_for_reencode_when_mode_auto(monkeypatch):
+    # Deliberately treated like "off" here -- see needs_segment_boundaries's
+    # docstring: a scan must never trigger encoder_detect's probing
+    # subprocesses, even indirectly via the auto-detection benchmark.
+    monkeypatch.setattr(config, "TRANSCODE_MODE", "auto")
+    assert transcode.needs_segment_boundaries(Path("clip.mkv"), "hevc", "aac", 2) is False
+
+
+def test_needs_segment_boundaries_false_for_reencode_when_mode_off(monkeypatch):
+    monkeypatch.setattr(config, "TRANSCODE_MODE", "off")
+    assert transcode.needs_segment_boundaries(Path("clip.mkv"), "hevc", "aac", 2) is False
 
 
 def test_scale_args_noop_when_dimensions_unknown():
