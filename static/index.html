@@ -78,18 +78,24 @@
 
   <div id="status-announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 
-  <!-- Vendored, self-hosted (no CDN) -- plays the HLS streams
-       app/transcode.py produces for files needing a container/audio fix.
-       Preferred over native HLS wherever MSE exists (see app.js's playMedia
-       for why that order is load-bearing); only iOS Safari, which has no
-       MSE, uses its native support instead. -->
-  <script src="/hls.min.js"></script>
-  <!-- Deliberate exception to the "everything vendored, no CDN" rule above:
-       Google's Cast Web Sender SDK terms prohibit self-hosting it, so this
-       one script must load from Google's own CDN. Only the sender's browser
-       tab needs internet access for this -- once a cast session starts, the
-       actual media bytes flow LAN-only, straight from this server to the TV. -->
-  <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
-  <script src="/app.js"></script>
+  <!-- hls.min.js is no longer loaded here -- app.js lazy-loads it on demand
+       (only when a file actually needs HLS) via player.js's ensureHls(),
+       since most playback is direct-play and the 532KB parse/download cost
+       was previously paid on every single page view regardless. -->
+  <!-- Deliberate exception to the "everything vendored, no CDN" rule
+       elsewhere in this app: Google's Cast Web Sender SDK terms prohibit
+       self-hosting it, so this one script must load from Google's own CDN.
+       `async` is load-bearing, not a perf nicety: without it, this is a
+       classic blocking <script src> and the next script tag (app.js) can't
+       even start loading until this one finishes -- on a LAN with no
+       internet access (a fully supported, documented use case for this
+       app), or if gstatic.com is just slow/blocked, that stalled the
+       entire app's boot behind an external CDN request that has nothing to
+       do with local playback. Cast's own sender API is designed around
+       `window.__onGCastApiAvailable` specifically so it can be loaded this
+       way -- the framework polls for that callback once it's ready,
+       regardless of load order. -->
+  <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1" async></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>

@@ -12,20 +12,30 @@ let currentPath = null;
 let currentParent = null;
 const selectedFolders = [];
 
+// Guards against a slower, superseded request overwriting the browser view
+// with stale directory listings -- e.g. clicking two different subfolders
+// in quick succession, where the first click's response could otherwise
+// arrive after the second and render the wrong folder's contents.
+let browseRequestId = 0;
+
 async function browse(path) {
+  const requestId = ++browseRequestId;
   const params = path ? new URLSearchParams({ path }) : new URLSearchParams();
   let res;
   try {
     res = await fetch(`/api/setup/browse?${params}`);
   } catch (err) {
+    if (requestId !== browseRequestId) return;
     errorEl.textContent = "Couldn't reach the server. Check your connection and try again.";
     return;
   }
+  if (requestId !== browseRequestId) return;
   if (!res.ok) {
     errorEl.textContent = "Couldn't open that folder.";
     return;
   }
   const data = await res.json();
+  if (requestId !== browseRequestId) return;
   currentPath = data.path;
   currentParent = data.parent;
   errorEl.textContent = "";

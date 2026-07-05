@@ -612,8 +612,89 @@ skipping) plus the e2e suite on Ubuntu.
   looked exactly like mDNS had failed even though it hadn't. If you
   add more `logger.info()` calls elsewhere expecting them to be
   visible, they'll work now that this is fixed — don't rediscover this
-  the hard way.
-- `static/` — plain JS, no bundler. `app.js` fetches `/api/library`
+  the hard way. Also warns at startup if `config.SECRET_KEY_IS_EPHEMERAL`
+  is true (no `PARZTREAM_SECRET_KEY` set) — otherwise a forgotten env var
+  in a `deploy/` setup silently signs everyone out on every restart with
+  no diagnostic trail, unlike the analogous `AUTH_PIN` warnings right next
+  to it. A single `@app.exception_handler(Exception)` logs and turns any
+  *uncaught* exception (as opposed to the `HTTPException`s every route
+  already raises deliberately) into a generic `{"detail": "Internal
+  server error"}` 500 — closes the gap where an unexpected bug (a corrupt
+  DB row, an unexpected data shape) would otherwise fall through to
+  Starlette's bare default with no server-side log line pointing at what
+  broke.
+- `static/` — plain JS, no bundler. `app.js` was a single ~950-line file;
+  it's now split into native ES modules (`<script type="module" src="/app.js">`
+  in `index.html` — modules are natively deferred, so this also closes an
+  unrelated startup-ordering issue, see below) rather than pulled into a
+  build step, since the project's whole point is no bundler/no framework
+  and `import`/`export` is a language feature every target browser already
+  supports, not a new dependency. Layout, by responsibility: `state.js`
+  (the shared `playerState` object — `activePlayingId`/`activeRowBtn`/
+  `activeHls` — mutated directly by both `player.js` and `rows.js`, since
+  ES module bindings can't be reassigned from an importing module, only
+  read; sharing one mutable object is less boilerplate than a getter/setter
+  pair per field), `dom.js` (`announce()`, and `showMessage()` — a generic
+  "clear this container and show one centered message" helper used for
+  loading/error/empty states everywhere, list and grids alike), `resume.js`
+  (client-side-only resume position, unchanged), `cast.js` (Cast SDK setup
+  + `castMedia`/`isCastAvailable`), `rows.js` (`createMediaRow`/
+  `createPosterTile`/`renderPager`, plus `attachThumbnailFallback` and
+  `markActiveIfCurrent` — extracted once there were two real call sites
+  duplicating the same logic, not before), `player.js` (`playMedia`/
+  `stopPlayer`, the lazy hls.js loader — see below), `views.js` (routing:
+  `currentRoute`/`setActiveView`/`render`, and the three data loaders:
+  `loadLibrary`/`loadMoviesGrid`/`loadShowsGrid`/`loadShowView`), `scan.js`
+  (scan banner/diagnostics UI + `pollScanStatus` + the scan button's click
+  handler), and `app.js` itself (just wiring: the logout button and
+  `init()`). Dependency direction is one-way and acyclic: `player.js`
+  never imports `rows.js` or `views.js`, so there's no cycle to reason
+  about — check this still holds before adding a new cross-module call.
+
+  **hls.js is no longer loaded unconditionally.** `player.js`'s
+  `ensureHls()` injects `/hls.min.js` (532KB) as a `<script>` tag only the
+  first time `playMedia` actually hits an HLS-routed file, caching the
+  in-flight load as a promise so two HLS files clicked back-to-back share
+  one script load instead of injecting it twice — most playback is direct-
+  play and never touches this at all, so there's no reason to pay that
+  download/parse cost on every page view. A failed/offline load resolves
+  to `null` and falls through to the native-`canPlayType` branch exactly
+  as if `window.Hls` had never been present.
+
+  **The Cast SDK script is `async`, not a plain blocking `<script src>`.**
+  Without it, a classic (non-async/non-deferred) `<script src>` blocks the
+  *next* script tag from even starting to load until it finishes — so a
+  slow or blocked `gstatic.com` request (no internet, an ad-blocker, a
+  genuinely LAN-only/offline setup, which this app explicitly supports)
+  used to stall the entire app's boot behind an external CDN dependency
+  that has nothing to do with local playback. `async` is safe here
+  specifically because the Cast Web Sender SDK is designed around a
+  `window.__onGCastApiAvailable` callback (set in `cast.js`) that the SDK
+  polls for once it's ready, regardless of load order — this is Google's
+  own recommended integration pattern, not a workaround.
+
+  **Loading/error states for the Movies/TV Shows grids** (`loadMoviesGrid`/
+  `loadShowsGrid` in `views.js`) now match the flat list's: a "Loading…"
+  message via `showMessage()` before the fetch, and a distinct network-vs-
+  server-error message plus `announce()` call on failure — previously
+  these two functions rendered nothing while loading and failed
+  completely silently (`catch (err) { return; }`), so a slow connection or
+  a network hiccup on first load looked identical to "this library is
+  empty," which is the very first thing a new user sees. `.empty-message`
+  in `style.css` was generalized from `ul#media-list li.empty-message` to
+  a bare class selector for this reason — the grids' `<p class="empty-message">`
+  elements previously matched no rule at all and rendered unstyled.
+
+  **Stale-response guards**: `views.js`'s `loadShowView` and `setup.js`'s
+  `browse()` each track a request-generation counter and bail before
+  touching the DOM if a newer call has since started — otherwise a slower,
+  superseded request (clicking between two shows, or two folders, in quick
+  succession) could resolve after the newer one and overwrite the screen
+  with stale content. `playMedia`'s pre-play probe already had the
+  equivalent protection via `AbortController`; this extends the same
+  principle to the other two places a fast double-click could race.
+
+  `views.js`'s `loadLibrary` fetches `/api/library`
   (with `limit`/`offset`/`q`, tracked in module-level `offset`/search-
   input state, reset to 0 on filter change, show-select change,
   search input, or after a scan), renders each row as `<li><button
@@ -627,7 +708,7 @@ skipping) plus the e2e suite on Ubuntu.
   The search `<input>` is debounced 300ms (`searchDebounceTimer`) so
   it doesn't fire a request per keystroke. The shows `<select>` is
   repopulated from `GET /api/shows` on load and after each scan.
-  `playMedia` probes
+  `player.js`'s `playMedia` probes
   `/api/stream/{id}` with a tiny `Range: bytes=0-1` request first —
   this both warms the transcode cache before real playback starts and
   lets a `415` (unsupported video codec) show a "download instead"
@@ -697,13 +778,13 @@ skipping) plus the e2e suite on Ubuntu.
     inline there too) — a placeholder is not an accessible-name
     substitute, and disappears once the user starts typing anyway.
   - Content that changes without a page navigation (scan status,
-    search result counts, player state) should call `app.js`'s
+    search result counts, player state) should call `dom.js`'s
     `announce(message)` helper, which writes into the hidden
     `#status-announcer` (`aria-live="polite"`) — otherwise screen
     reader users get no feedback that anything happened. `setup.html`
     has its own local live regions instead (`#current-path` as
-    `aria-live="polite"`, `#setup-error` as `role="alert"`) since it
-    doesn't share `app.js`.
+    `aria-live="polite"`, `#setup-error` as `role="alert"`) since it's a
+    separate non-module script, not part of `app.js`'s module graph.
   - `<img>` elements need an explicit `alt` — `alt=""` when the image
     is purely decorative/redundant with adjacent text (e.g. the
     library thumbnails, since the title label right next to them
@@ -728,7 +809,7 @@ skipping) plus the e2e suite on Ubuntu.
     — the flex layout stays row-based above that width. `.row-label`
     (library row titles) gets `text-overflow: ellipsis` so a long
     title/show name can't blow out the row width on a narrow screen.
-  - Fullscreen-on-play (`app.js`'s `requestVideoFullscreen`) is gated
+  - Fullscreen-on-play (`player.js`'s `requestVideoFullscreen`) is gated
     on `window.matchMedia("(pointer: coarse)").matches`
     (`isTouchDevice`), not a viewport-width check — a narrow desktop
     window shouldn't trigger phone-style fullscreen, and a large
@@ -754,7 +835,7 @@ skipping) plus the e2e suite on Ubuntu.
     as the accessibility work above, built correct against the
     relevant web platform APIs and reviewed, not device-tested.
 
-  **TV casting (Google Cast + AirPlay):** a Cast button (`static/app.js`'s
+  **TV casting (Google Cast + AirPlay):** a Cast button (`static/cast.js`'s
   `castMedia`) lets `playMedia`'s existing sender-side player act as a
   remote control for a Chromecast/Google TV/Android TV device — the
   browser tab stays the sender, the TV's own default media receiver
@@ -773,7 +854,15 @@ skipping) plus the e2e suite on Ubuntu.
   `POST /api/cast-token/{id}` — reachable only by an already-authenticated
   sender — and the middleware accepts `?cast_token=` as an alternative to
   the cookie, but only for the exact stream/HLS path shapes matched by
-  `CAST_STREAM_PATH_RE`, never any other route. Chromecast's default
+  `CAST_STREAM_PATH_RE`, never any other route. `POST /api/cast-token/{id}`
+  is also the one endpoint besides `/api/login` with any rate limiting:
+  `auth.check_cast_token_rate_limit` caps it at `CAST_TOKEN_RATE_LIMIT`
+  (20) mints per rolling `CAST_TOKEN_RATE_WINDOW_SECONDS` (60) per client
+  IP, a plain fixed-window counter rather than the login lockout's
+  escalating-lockout logic — minting a token isn't a guessing attack (the
+  token itself is still an unforgeable signed value), this only exists to
+  cap a script minting tokens in a tight loop; normal casting use never
+  comes close. Chromecast's default
   receiver doesn't support the Matroska container at all (unlike this
   app's own `<video>` player, which can direct-play many `.mkv` files), so
   `castMedia` forces the HLS remux path for casting whenever the source
@@ -999,3 +1088,14 @@ trying to override the environment mid-test.
   `_extract_metadata`/`_first_tag`.
 - Auth is intentionally minimal (single shared password, no
   per-user accounts) — this is a home-LAN tool, not multi-tenant.
+
+## Non-goals
+
+- **No "Continue Watching" / server-side watch state.** Resume position
+  stays client-side only (`static/resume.js`'s `localStorage`-based
+  `resumeKey`/`saveResumePosition`/`getResumePosition`), even though it
+  doesn't survive a device switch. This has been proposed before (it
+  scored well on effort-vs-impact) but is a deliberate scope cut, not an
+  oversight — don't add a `playback_state` table, a progress-reporting
+  endpoint, or a "Continue Watching" shelf without the user explicitly
+  asking for it first.

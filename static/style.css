@@ -540,11 +540,22 @@ ul#media-list li:last-child {
   font-size: 1.1rem;
 }
 
-ul#media-list li.empty-message {
+/* Generic (not scoped to #media-list) since it's also used for the Movies/
+   TV Shows grids' loading/error/empty states now -- previously scoped to
+   `ul#media-list li.empty-message` only, so the grids' equivalent <p>
+   elements rendered completely unstyled (default browser text, not
+   centered/muted like everywhere else this class is used). */
+.empty-message {
   padding: 1.5rem 1rem;
   text-align: center;
   color: #9aa0aa;
   cursor: default;
+}
+
+/* A lone message inside a CSS grid otherwise only fills one card-sized
+   cell instead of reading as a full-width status line. */
+.poster-grid .empty-message {
+  grid-column: 1 / -1;
 }
 
 #pager {
