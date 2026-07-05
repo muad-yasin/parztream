@@ -10,6 +10,41 @@ Delete entries as they're resolved.
 M2, M3, M4, M5, L2, L6, L7, L8, L11, L12, L13, PB2, PB5 (same defect as
 H2), PB6, PP1 (same defect as H3), PP3.
 
+**Resolved 2026-07-04** (keyframe-accurate HLS segment boundaries,
+commit 3233e7d): PP5. New items opened the same day from manual
+real-file testing: M8 and PP6 — both resolved 2026-07-05, see below.
+
+**Resolved 2026-07-05**: **PP6** and **M8**. PP6's root cause was the
+HLS segment format itself: `-reset_timestamps 1` restarted every
+segment near pts 0, which is non-compliant HLS — hls.js's video
+remuxer re-anchors on the jump each fragment, but its *audio* remuxer
+drops the "overlapping" audio, so the audio buffer starved along ~1s
+ahead of the playhead while video buffered 250s+ (observed via
+SourceBuffer instrumentation in a real Chromium against "300: Rise of
+an Empire"; plain sequential playback, no seek needed). Fixed by
+emitting one continuous absolute timeline instead: all jobs run under
+`-copyts -avoid_negative_ts disabled` with no `-reset_timestamps`;
+re-encode jobs get absolute `-force_key_frames` times and a
+boundary-minus-guard seek (accurate_seek would otherwise drop the
+boundary frame itself). This also kills a second confirmed bug by
+construction: a seeked job's first segment used to keep absolute
+timestamps while every other segment reset, so the same index could
+carry timestamps minutes apart depending on which job wrote it. Stale
+pre-format-change cache dirs are wiped once via a
+`.timestamps_continuous` marker file (which `cache.prune` now never
+evicts). Verified: a regression test asserting cross-job timestamp
+equality + timeline continuity (red on the old code), full suite +
+e2e green, and real-browser playback of 300:RoaE (sequential, cold
+far seek, seek back) with the audio/video SourceBuffers advancing in
+lockstep. M8 ("House of David" S02 sorting under Movies): the release
+folder `House of David [2025] S02 Dual YG/S02E06 Forged in Fire.mkv`
+carries no show prefix in its filenames and no plain season folder,
+so both existing heuristics fell through to movie classification —
+added a third, lowest-priority scanner heuristic (a bare leading
+`S##E##` stem takes its show name from the parent folder name,
+cleaned of bracket groups and season-token-onward junk) plus scanner
+tests using the real structure. Rescan to regroup the episodes.
+
 ## Medium
 
 - [ ] **M1. Entire scan runs as one SQLite write transaction**
@@ -219,10 +254,24 @@ genuinely can't fix (see TS_SAFE_VIDEO_CODECS).
 - [ ] **PP4. Slow starts are structural.** probe → playlist → spawn
   ffmpeg → wait for segment 0 *and* 1 (completion heuristic needs N+1)
   → several seconds to first frame even on fast disks.
-- [ ] **PP5. Post-seek A/V glitches.** `-ss N*6` + `-c:v copy` +
+- [x] **PP5. Post-seek A/V glitches.** `-ss N*6` + `-c:v copy` +
   `-reset_timestamps 1` starts at the nearest keyframe while the
   playlist promises an exact 6s grid → timing drift at job-splice
-  points, felt as jump/stutter right after seeking.
+  points, felt as jump/stutter right after seeking. *Fixed
+  (2026-07-04, commit 3233e7d): segment boundaries are now computed
+  from each file's real keyframes and stored per media row; the
+  playlist's EXTINF values and every job's split points are derived
+  from those same boundaries, and a seeked stream-copy job probes
+  where `-ss` actually lands (mkv's demuxer can land short of the
+  requested target) before spawning, so any two jobs asked for
+  "segment N" cut identical content. Verified end-to-end against a
+  real uvicorn + Chromium with irregular-keyframe test media.*
+
+- [x] **PP6. Audio off/desynced on real files.** *Fixed (2026-07-05):
+  the HLS segment format itself was the cause — `-reset_timestamps 1`
+  per-segment resets that hls.js's audio remuxer can't stitch. See the
+  "Resolved 2026-07-05" note at the top of this file for the full
+  mechanism, fix (continuous absolute timestamps), and verification.*
 
 Ruled out: hls.js version, chunk size, MIME handling (guess_type on the
 served path; `.m4b` already special-cased), Range parsing (compliant
@@ -230,19 +279,18 @@ enough for real browsers).
 
 ## Remaining action items
 
-1. Config: `PARZTREAM_ENABLE_TRANSCODE=1` for HEVC (PB1) — the user's
+1. Rescan the library: picks up M8's regrouping of "House of David"
+   S02 under TV Shows, and PB3/PB4 repair (after confirming ffprobe
+   health).
+2. Config: `PARZTREAM_ENABLE_TRANSCODE=1` for HEVC (PB1) — the user's
    own call, encoder detection is now fixed for VAAPI/QSV (see git log)
    but still worth verifying on real target hardware.
-2. Rescan after confirming ffprobe health (PB3/PB4).
 3. fMP4 HLS segments instead of TS: the properly durable fix for any
    future codec-routing edge case (carries vp9/av1/opus natively), modern
    hls.js path. Needs real-browser testing incl. Safari native HLS. Not
    urgent now that PB2's specific vp8/vp9/av1 failure mode is fixed by
    routing those to a clear 415 instead.
 4. Event-driven segment waits (PP2) — biggest remaining performance item.
-5. Bound re-encode/-copy jobs with `-t` to stop exactly before the next
-   job's range (PP5), instead of (or in addition to) the current
-   terminate-the-old-job approach, to smooth the splice point itself.
 
 **Open questions / user testing needed before implementing**
 - Which failure class dominates this library:

@@ -419,6 +419,67 @@ def test_scan_flat_filename_style_is_unaffected_by_folder_feature(make_file, mon
     assert row["episode_number"] == 2
 
 
+@pytest.mark.parametrize(
+    "path,root,expected",
+    [
+        # The literal M8 bug: a real season pack whose filenames carry no
+        # show prefix, inside a release-named folder.
+        (
+            "/media/Movies/House of David [2025] S02 Dual YG/S02E06 Forged in Fire.mkv",
+            "/media/Movies", ("House of David", 2, 6),
+        ),
+        ("/media/TV/show [x265]/s01e02.mkv", "/media/TV", ("show", 1, 2)),
+        # Dotted release folder: season token and everything after it is
+        # junk, separators collapse to spaces.
+        (
+            "/media/TV/The.Wire.S03.1080p.WEBRip/S03E01.mkv",
+            "/media/TV", ("The Wire", 3, 1),
+        ),
+        # Directly under the library root: no folder to name the show.
+        ("/media/TV/S01E01 Pilot.mkv", "/media/TV", (None, None, None)),
+        # The folder is nothing but a season marker once cleaned -- the
+        # deliberate "don't use the library root as a show name" rejection
+        # in the season-folder heuristic must not be re-guessed here.
+        (
+            "/media/TV/Season 2 (2013)/S02E01 Title.mkv",
+            "/media/TV", (None, None, None),
+        ),
+        # A show prefix in the filename means this isn't the bare-tag
+        # convention -- that's _parse_show_episode's territory.
+        (
+            "/media/TV/Somewhere/Show S01E02.mkv",
+            "/media/TV", (None, None, None),
+        ),
+        # "S1m0ne"-style titles: S+digit not followed by E+digits.
+        ("/media/Movies/Folder/S1m0ne.mkv", "/media/Movies", (None, None, None)),
+    ],
+)
+def test_parse_bare_episode_with_folder_show(path, root, expected):
+    assert scanner._parse_bare_episode_with_folder_show(Path(path), Path(root)) == expected
+
+
+def test_scan_groups_bare_episode_tags_under_the_release_folder_show(make_file, monkeypatch):
+    # Regression for M8 (confirmed live): "House of David [2025] S02 Dual
+    # YG/S02E06 Forged in Fire.mkv" classified every episode as its own
+    # movie -- no show prefix in the filenames for the flat heuristic, and
+    # the folder isn't a plain season folder for the folder heuristic.
+    monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None, None, 0))
+    make_file("House of David [2025] S02 Dual YG/S02E01 A Tale of Two Swords.mkv")
+    make_file("House of David [2025] S02 Dual YG/S02E06 Forged in Fire.mkv")
+
+    scanner.scan_media_dirs()
+
+    rows = {Path(r["path"]).name: r for r in _rows()}
+    for name, episode in [
+        ("S02E01 A Tale of Two Swords.mkv", 1),
+        ("S02E06 Forged in Fire.mkv", 6),
+    ]:
+        assert rows[name]["show_name"] == "House of David"
+        assert rows[name]["season_number"] == 2
+        assert rows[name]["episode_number"] == episode
+        assert not rows[name]["is_movie"]
+
+
 def test_scan_derives_movie_title_from_folder_name(make_file, monkeypatch):
     monkeypatch.setattr(scanner, "_probe_video_info", lambda path, *_: (None, "h264", "aac", None, None, None, 0))
     make_file("Movies/Inception (2010)/Inception.2010.1080p.BluRay.x264-GROUP.mkv")

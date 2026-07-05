@@ -348,9 +348,30 @@ skipping) plus the e2e suite on Ubuntu.
   keyframe timestamps `app/scanner.py`'s `probe_keyframes` extracts)
   fixed a confirmed-real stutter/A/V-desync bug: `-c:v copy` can only
   cut at keyframes, so the old fixed-6s-grid playlist's EXTINF values
-  lied about real segment durations, and with `-reset_timestamps 1`
-  hls.js has nothing but EXTINF to place segments — the mismatch
-  accumulated as drift. Boundaries are computed at scan time (only
+  lied about real segment durations. Segments carry the source's own
+  **continuous absolute timestamps** (`-copyts -avoid_negative_ts
+  disabled` on every job; deliberately no `-reset_timestamps`) — like
+  a normal pre-segmented HLS VOD. An earlier design reset every
+  segment's timestamps to ~0 and trusted EXTINF for placement; that
+  turned out to be the root cause of audio being audibly
+  broken/desynced on every HLS-routed file (PP6): per-segment resets
+  are non-compliant HLS, and hls.js only *appears* to cope — its
+  video remuxer re-anchors on the PTS jump each fragment, but its
+  audio remuxer drops the "overlapping" reset audio, leaving the
+  audio SourceBuffer starving ~1s ahead of the playhead while video
+  buffered minutes ahead (observed against a real library file via
+  MediaSource instrumentation in Chromium; plain sequential playback,
+  no seeking needed). Continuous timestamps also make any two jobs'
+  output for "segment N" identical *by construction*. Cache dirs
+  holding pre-format-change segments are wiped once on first touch
+  via a `.timestamps_continuous` marker file in each `{id}_hls/` dir
+  (`_ensure_segment_format`; `cache.py`'s prune deliberately never
+  evicts dotfiles so a budget prune can't re-trigger the wipe). One
+  known cosmetic quirk, deterministic and covered by tests: segment 0
+  alone sits up to one B-frame reorder delay (~80ms) high, because
+  its first dts is negative and each segment's own mpegts context
+  compensates that individually — within hls.js's placement
+  tolerance, not worth fighting. Boundaries are computed at scan time (only
   for files that would actually route through HLS — the keyframe
   probe walks every packet, so it's cached by path+size like the
   packet-scan duration fallback and never run for direct-play files),
@@ -387,15 +408,21 @@ skipping) plus the e2e suite on Ubuntu.
   always correct, capped by `SEEK_PROBE_LIMIT`), and the job anchors
   `-segment_start_number` and its split times to that landed boundary
   — the segment muxer measures `-segment_times` from the first packet
-  it receives (also confirmed empirically; neither absolute-`-copyts`
-  times nor times relative to the *requested* seek align when the
-  landing differs). `-copyts` pins the timeline the splits are
-  measured on, and `-noaccurate_seek` keeps a transcoded audio track
+  it receives (also confirmed empirically; neither absolute times nor
+  times relative to the *requested* seek align when the landing
+  differs). `-noaccurate_seek` keeps a transcoded audio track
   flowing from the landing alongside the copied video (accurate_seek
   would decode-drop audio up to the requested time, leaving the first
-  regenerated segments silent). Re-encode jobs skip all of this —
-  decoding plus default accurate_seek is already frame-exact at the
-  requested boundary. If you touch any of this, the uniform-keyframe
+  regenerated segments silent). Re-encode jobs skip the landing probe
+  — decoding plus accurate_seek is frame-exact — but seek to
+  boundary-MINUS-guard, not plus: accurate_seek keeps frames
+  at-or-after the target, so aiming past the boundary would drop the
+  boundary frame itself and (since splits are measured from the first
+  packet) skew every split target past its forced keyframe, missing
+  every cut. Their `-force_key_frames` times are the boundaries'
+  ABSOLUTE times — under `-copyts` the encoder compares against the
+  source's own clock, and a seek-relative time simply never fires
+  (both verified against real encodes). If you touch any of this, the uniform-keyframe
   trap matters for tests too: a clip with evenly spaced keyframes can
   produce the *wrong content at the right duration*, so duration
   assertions only prove correctness when the expected segment lengths

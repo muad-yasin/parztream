@@ -344,6 +344,9 @@ def test_start_job_with_boundaries_cuts_at_the_stored_times(monkeypatch):
     # timeline -- see _start_job.
     assert "-noaccurate_seek" in cmd
     assert "-copyts" in cmd
+    # Continuous timestamps only -- per-segment resets audibly broke audio
+    # in real browsers (the PP6 bug, see _start_job's -copyts comment).
+    assert "-reset_timestamps" not in cmd
     assert cmd[cmd.index("-segment_start_number") + 1] == "1"
     assert "-segment_time" not in cmd
     split_values = [float(v) for v in cmd[cmd.index("-segment_times") + 1].split(",")]
@@ -453,7 +456,10 @@ def test_start_job_probe_failure_falls_back_to_trusting_the_target(monkeypatch):
 
     cmd = captured_cmd["cmd"]
     assert float(cmd[cmd.index("-ss") + 1]) == pytest.approx(22.001, abs=1e-6)
-    assert "-copyts" not in cmd
+    # Even the degraded no-probe path keeps the one continuous timeline --
+    # a plain -ss without it would emit near-zero timestamps that can't be
+    # mixed with any other job's segments.
+    assert "-copyts" in cmd
     assert cmd[cmd.index("-segment_start_number") + 1] == "3"
     split_values = [float(v) for v in cmd[cmd.index("-segment_times") + 1].split(",")]
     guard = transcode.KEYFRAME_TIME_GUARD
@@ -483,8 +489,11 @@ def test_seeked_reencode_job_never_probes_the_demuxer_landing(monkeypatch):
         )
 
     cmd = captured_cmd["cmd"]
-    assert float(cmd[cmd.index("-ss") + 1]) == pytest.approx(12.001, abs=1e-6)
-    assert "-copyts" not in cmd
+    # Boundary MINUS the guard: accurate_seek keeps frames at-or-after the
+    # target, so aiming past the boundary would drop the boundary frame
+    # itself and skew every split (see _start_job's re-encode branch).
+    assert float(cmd[cmd.index("-ss") + 1]) == pytest.approx(11.999, abs=1e-6)
+    assert "-copyts" in cmd
     assert cmd[cmd.index("-segment_start_number") + 1] == "2"
 
 
@@ -547,6 +556,60 @@ def test_reencode_job_forces_keyframes_at_every_boundary(monkeypatch):
     # so every re-encoded segment starts decodable -- stream copy gets this
     # for free from the source's own keyframes, a re-encode has to ask.
     assert forced == pytest.approx([6.0, 12.5], abs=1e-6)
+
+    # Seeked: still the boundaries' ABSOLUTE times -- under -copyts the
+    # encoder compares against the source's own clock, and a seek-relative
+    # time simply never fires (verified against a real encode).
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        transcode._start_job(
+            Path("/tmp/some_hls_dir"), Path("/media/clip.mkv"), remux_audio=False,
+            start_index=1, reencode_video=True, boundaries=[0.0, 6.0, 12.5],
+        )
+    cmd = captured_cmd["cmd"]
+    forced = [float(v) for v in cmd[cmd.index("-force_key_frames") + 1].split(",")]
+    assert forced == pytest.approx([12.5], abs=1e-6)
+
+
+def test_stale_reset_format_segments_are_wiped_once_on_first_request(tmp_path, monkeypatch):
+    # Segments cached before the continuous-timestamp format change each
+    # restart near pts 0 -- serving one of those next to a new-format
+    # segment reproduces exactly the timestamp chaos the change removed,
+    # so a directory without the format marker gets wiped once.
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+    hls_dir = transcode.hls_dir_for(9)
+    hls_dir.mkdir(parents=True)
+    stale = hls_dir / "segment_00000.ts"
+    stale.write_bytes(b"pre-format-change segment")
+
+    transcode._ensure_segment_format(9, hls_dir)
+
+    assert not stale.exists()
+    assert (hls_dir / transcode._FORMAT_MARKER).is_file()
+
+    # Second touch is a no-op: marked directories keep their segments.
+    keep = hls_dir / "segment_00000.ts"
+    keep.write_bytes(b"new-format segment")
+    transcode._ensure_segment_format(9, hls_dir)
+    assert keep.read_bytes() == b"new-format segment"
+
+
+def test_prune_never_evicts_the_segment_format_marker(tmp_path, monkeypatch):
+    from app import cache
+
+    monkeypatch.setattr(cache, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(cache, "CACHE_MAX_BYTES", 1)  # evict everything
+    hls_dir = tmp_path / "9_hls"
+    hls_dir.mkdir()
+    (hls_dir / "segment_00000.ts").write_bytes(b"x" * 100)
+    marker = hls_dir / transcode._FORMAT_MARKER
+    marker.touch()
+
+    cache.prune()
+
+    assert not (hls_dir / "segment_00000.ts").exists()
+    # Losing the marker would wipe the directory again on the next
+    # request even though its remaining segments are the right format.
+    assert marker.is_file()
 
 
 def test_segment_request_past_the_playlist_end_fails_without_spawning_ffmpeg(tmp_path, monkeypatch):
@@ -703,6 +766,108 @@ def test_seeked_job_produces_the_same_segment_as_a_sequential_one(tmp_path, monk
     # produced must match it.
     seeked_middle = transcode.ensure_segment(606, mkv_path, remux_audio=False, index=1, boundaries=boundaries)
     assert segment_duration(seeked_middle) == pytest.approx(sequential_duration, abs=0.15)
+
+
+@requires_ffmpeg
+def test_seeked_job_segments_carry_the_same_timestamps_as_sequential_ones(tmp_path, monkeypatch, h264_encoder):
+    # PP6 regression, confirmed live against a real library file: the
+    # duration/content test above passed while segment TIMESTAMPS were
+    # broken two ways -- every segment reset to pts ~0 (which hls.js's
+    # audio remuxer can't stitch: it drops the "overlapping" audio, so
+    # sound starves/desyncs on every HLS-routed file), and a seeked job's
+    # first segment kept absolute timestamps while the rest reset, so the
+    # same index could differ by minutes depending on which job wrote it.
+    # The fix is one continuous absolute timeline (see _start_job's
+    # -copyts comment), which this test pins down in both directions:
+    # same index => same timestamps regardless of job, and consecutive
+    # segments => contiguous timestamps exactly one EXTINF apart. Checked
+    # for the audio stream too, since the desyncing real files all route
+    # through remux_audio=True (hence the ac3 source track here).
+    from app import scanner
+
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+    mkv_path = tmp_path / "clip.mkv"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc=size=64x64:rate=25:duration=20",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=20",
+            # Irregular on purpose -- see the sibling test above.
+            "-force_key_frames", "0,4,9,15",
+            "-c:v", h264_encoder, "-c:a", "ac3", "-shortest",
+            str(mkv_path),
+        ],
+        check=True,
+    )
+
+    boundaries = transcode.compute_segment_boundaries(
+        scanner.probe_keyframes(mkv_path), duration=20.0
+    )
+    assert boundaries == pytest.approx([0.0, 9.0, 15.0], abs=0.05)
+
+    def stream_starts(path):
+        # First packet pts per stream, read from the packets themselves --
+        # ffprobe's stream-level start_time is a heuristic that can sit a
+        # B-frame reorder delay off for a segment whose first dts precedes
+        # its first pts, which is exactly the precision under test here.
+        starts = {}
+        for selector, codec_type in (("v:0", "video"), ("a:0", "audio")):
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-select_streams", selector,
+                    "-show_entries", "packet=pts_time",
+                    "-of", "csv=p=0", str(path),
+                ],
+                capture_output=True, text=True, check=True,
+            )
+            first = next((l for l in probe.stdout.splitlines() if l.strip(",")), None)
+            if first is not None:
+                starts[codec_type] = float(first.strip(","))
+        return starts
+
+    # Sequential job: starts from the top, then a second request for the
+    # final index rides the same job -- and a final-index request only
+    # returns once the job has fully exited (see ensure_segment's wait
+    # loop), so every file compared below is complete, not mid-write.
+    transcode.ensure_segment(607, mkv_path, remux_audio=True, index=0, boundaries=boundaries)
+    transcode.ensure_segment(607, mkv_path, remux_audio=True, index=2, boundaries=boundaries)
+    # Seeked job under a fresh media id: asked directly for a later
+    # segment, so it anchors at a probed landing and runs with
+    # -copyts (see _start_job); same final-index completion guarantee.
+    seeked = transcode.ensure_segment(608, mkv_path, remux_audio=True, index=2, boundaries=boundaries)
+    assert seeked.is_file()
+
+    sequential_dir = transcode.hls_dir_for(607)
+    for segment in sorted(transcode.hls_dir_for(608).glob("segment_*.ts")):
+        twin = sequential_dir / segment.name
+        assert twin.is_file(), f"sequential job never produced {segment.name}"
+        seeked_starts = stream_starts(segment)
+        sequential_starts = stream_starts(twin)
+        assert set(seeked_starts) == {"video", "audio"}
+        for codec_type, start in sequential_starts.items():
+            assert seeked_starts[codec_type] == pytest.approx(start, abs=0.05), (
+                f"{segment.name} {codec_type} starts at {seeked_starts[codec_type]}"
+                f" from the seeked job but {start} from the sequential one"
+            )
+
+    # Continuity: within one job's output, each segment's video timeline
+    # picks up exactly where the previous one left off (one boundary
+    # further along) -- per-segment resets would make every delta ~0.
+    # Segment 0 alone may sit up to one B-frame reorder delay high: its
+    # first dts is negative on a B-frame source, and each segment's own
+    # mpegts muxer context compensates negative starts individually.
+    # That bump is deterministic (any job producing segment 0 starts from
+    # the top and gets the identical shift -- the cross-job assertions
+    # above already prove it), one-time, and far inside hls.js's default
+    # fragment-placement tolerance, so it's tolerated rather than fought.
+    sequential_video_starts = [
+        stream_starts(sequential_dir / f"segment_{i:05d}.ts")["video"]
+        for i in range(len(boundaries))
+    ]
+    deltas = [b - a for a, b in zip(sequential_video_starts, sequential_video_starts[1:])]
+    expected = [b - a for a, b in zip(boundaries, boundaries[1:])]
+    assert deltas[0] == pytest.approx(expected[0], abs=0.2)
+    assert deltas[1:] == pytest.approx(expected[1:], abs=0.05)
 
 
 @requires_ffmpeg

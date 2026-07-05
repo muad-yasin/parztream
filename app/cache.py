@@ -61,6 +61,12 @@ def prune(protect: Path = None):
         try:
             if p.is_dir():
                 for seg in p.glob("*"):
+                    # Dotfiles are metadata, not cached content -- e.g.
+                    # app/transcode.py's segment-format marker, whose
+                    # eviction would wipe the whole directory's otherwise
+                    # valid segments on the next request.
+                    if seg.name.startswith("."):
+                        continue
                     try:
                         if seg.is_file():
                             sized.append((seg, seg.stat().st_size, seg.stat().st_mtime))

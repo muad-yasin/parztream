@@ -351,6 +351,19 @@ def _extract_metadata(
             # to" (show_name is None but is_extra is already True) is
             # overwritten here.
             show_name, season_number, episode_number = _parse_show_episode(path.stem)
+        if show_name is None and not is_extra and media_root is not None:
+            # Third, lowest-priority layer: the filename IS just the
+            # episode tag plus a title ("S02E06 Forged in Fire.mkv") with
+            # no show prefix for _parse_show_episode to find, and the
+            # parent is a release-named show-season folder ("House of
+            # David [2025] S02 Dual YG") rather than a plain season folder
+            # _parse_folder_show_episode would recognize. Confirmed real
+            # (M8): a full season shaped exactly like that classified as
+            # eight separate movies. Only ever reached when both heuristics
+            # above found nothing, so it can't override a real match.
+            show_name, season_number, episode_number = _parse_bare_episode_with_folder_show(
+                path, media_root
+            )
         info["show_name"], info["season_number"], info["episode_number"], info["is_extra"] = (
             show_name, season_number, episode_number, is_extra,
         )
@@ -393,6 +406,50 @@ def _parse_show_episode(stem: str):
     if not match:
         return None, None, None
     show_name = re.sub(r"[\s._-]+", " ", match.group("show")).strip()
+    if not show_name:
+        return None, None, None
+    return show_name, int(match.group("season")), int(match.group("episode"))
+
+
+# A filename stem that *starts* with the S##E## tag itself -- no show name
+# in front for _SHOW_EPISODE_RE to capture (which is exactly why that regex
+# can never match these). The lookahead requires a separator or end after
+# the episode digits, same boundary discipline as _LEADING_EPISODE_RE.
+_BARE_EPISODE_RE = re.compile(r"^[Ss](?P<season>\d{1,2})[Ee](?P<episode>\d{1,3})(?=[\s._-]|$)")
+
+# Bracketed release junk in a folder name: "[2025]", "[YTS.MX]", "(2010)".
+_BRACKET_GROUP_RE = re.compile(r"[\[(][^\])]*[\])]")
+
+# A season marker inside a longer folder name ("... S02 Dual YG",
+# "... Season 2 1080p") -- everything from it onward is release junk, not
+# part of the show's name. Word-bounded so a name like "Se7en" or a word
+# starting with "s" followed by digits mid-token can't trigger it.
+_NAME_SEASON_TOKEN_RE = re.compile(
+    r"(?:^|[\s._-])(?:[Ss]eason[\s._-]*\d{1,2}|[Ss]\d{1,2})(?=[\s._-]|$)"
+)
+
+
+def _parse_bare_episode_with_folder_show(path: Path, media_root: Path):
+    """Recognize "<release-named show folder>/S02E06 Title.ext": the
+    filename carries season+episode but no show name, so the show name has
+    to come from the containing folder -- cleaned of bracketed groups and
+    truncated at its season token, since these folders are release-named
+    ("House of David [2025] S02 Dual YG"), not tidy show names. Returns
+    (None, None, None) rather than guessing when the file sits directly in
+    a library root (no folder to name the show), or when cleaning leaves
+    nothing (e.g. the folder is nothing but a season marker -- a bare
+    "Season 2 (2013)"-style folder with no show folder above it is not
+    this convention)."""
+    match = _BARE_EPISODE_RE.match(path.stem)
+    if not match:
+        return None, None, None
+    if path.parent == media_root:
+        return None, None, None
+    name = _BRACKET_GROUP_RE.sub(" ", path.parent.name)
+    season_token = _NAME_SEASON_TOKEN_RE.search(name)
+    if season_token:
+        name = name[: season_token.start()]
+    show_name = re.sub(r"[\s._-]+", " ", name).strip()
     if not show_name:
         return None, None, None
     return show_name, int(match.group("season")), int(match.group("episode"))

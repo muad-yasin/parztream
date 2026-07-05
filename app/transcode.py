@@ -247,6 +247,26 @@ def hls_dir_for(media_id: int) -> Path:
     return CACHE_DIR / f"{media_id}_hls"
 
 
+# Marks an HLS cache directory as holding continuous-timestamp segments
+# (see _start_job's -copyts comment). Directories from before that format
+# change hold segments that each restart near pts 0 -- mixing the two in
+# one playback session reproduces exactly the timestamp chaos the change
+# removed, so leftovers are wiped once instead. A dotfile deliberately:
+# cache.prune skips dotfiles, so budget eviction can never delete the
+# marker out from under a full directory (which would wipe it all again).
+_FORMAT_MARKER = ".timestamps_continuous"
+
+
+def _ensure_segment_format(media_id: int, hls_dir: Path):
+    marker = hls_dir / _FORMAT_MARKER
+    if marker.exists():
+        return
+    if any(hls_dir.glob("segment_*.ts")):
+        invalidate_segments(media_id)
+        hls_dir.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+
+
 def needs_segment_boundaries(path: Path, video_codec, audio_codec, audio_channels) -> bool:
     """Whether this video would route through the HLS path at all, i.e.
     whether paying the (packet-walk-priced, see app/scanner.py's
@@ -517,6 +537,7 @@ def ensure_segment(
         raise FileNotFoundError(f"segment {index} is past the end of the playlist")
     hls_dir = hls_dir_for(media_id)
     hls_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_segment_format(media_id, hls_dir)
     target = _segment_path(hls_dir, index)
 
     job = _find_or_start_job(
@@ -747,20 +768,51 @@ def _start_job(
     audio_args = ["-c:a", "aac", "-ac", "2"] if remux_audio else ["-c:a", "copy"]
     segment_pattern = str(hls_dir / "segment_%05d.ts")
 
+    # Every job runs under -copyts: segments carry the source's own
+    # CONTINUOUS timestamps (segment N's internal clock starts at boundary
+    # N, plus the mpegts muxer's fixed startup offset), exactly like a
+    # normal pre-segmented HLS VOD stream. This replaced -reset_timestamps
+    # 1 (every segment restarting near 0), which turned out to be the PP6
+    # audio-desync root cause: per-segment resets are non-compliant HLS,
+    # and hls.js only *appears* to cope -- its video remuxer re-anchors on
+    # the big PTS jump every fragment, but its audio remuxer treats the
+    # reset audio as overlapping already-buffered content and drops it.
+    # Observed against a real library file (Chromium, hls.js 1.6,
+    # SourceBuffer instrumentation): video buffered 250s ahead while
+    # audio starved along ~1s ahead of the playhead, hls.js re-fetching
+    # early fragments over and over to squeeze out slivers of audio --
+    # audibly broken sound on every HLS-routed file. With continuous
+    # timestamps both buffers advance in lockstep (verified the same
+    # way). A second bug this kills by construction: a seeked -copyts job
+    # under reset_timestamps kept absolute timestamps in its FIRST
+    # segment only (the reset only kicks in from the first split), so the
+    # same index could carry wildly different timestamps depending on
+    # which job wrote it; now every job emits the one absolute timeline,
+    # so any two jobs' output for segment N is identical. hls.js maps the
+    # constant mux offset out via initPTS from whichever fragment it
+    # loads first -- correct even when playback starts mid-file.
+    # -avoid_negative_ts disabled: on a B-frame source the very first
+    # packet's dts is negative (one reorder delay below pts 0), and the
+    # default "auto" quietly shifts a from-zero job's entire timeline up
+    # by that amount to compensate -- a shift no seeked job (starting at
+    # a positive dts) ever gets, leaving the same index up to one reorder
+    # delay apart across jobs (caught by the timestamp-equality
+    # regression test). Disabling it keeps every job on the source's
+    # exact clock; the mpegts muxer's own fixed startup offset (1.4s)
+    # comfortably absorbs the small negative input dts.
+    copyts_args = ["-copyts", "-avoid_negative_ts", "disabled"]
     effective_index = start_index
-    copyts_args = []
     if boundaries is not None:
         # Keyframe-accurate cutting: start the job at a stored boundary and
         # split at every subsequent one, so the segments this job writes
         # match build_playlist's EXTINF values exactly. The segment muxer
         # measures -segment_times against the first packet it receives
-        # (confirmed empirically -- neither -copyts absolute times nor
-        # times relative to the *requested* -ss align if the demuxer lands
-        # anywhere other than assumed), so everything below is anchored to
-        # where the seek provably lands, not to where it was aimed.
-        # KEYFRAME_TIME_GUARD (see its comment) keeps float/timebase
-        # rounding from snapping the seek to the previous keyframe or a
-        # split to the next one.
+        # (confirmed empirically, -copyts or not -- absolute times don't
+        # align if the demuxer lands anywhere other than assumed), so
+        # everything below is anchored to where the seek provably lands,
+        # not to where it was aimed. KEYFRAME_TIME_GUARD (see its comment)
+        # keeps float/timebase rounding from snapping the seek to the
+        # previous keyframe or a split to the next one.
         if start_index and not reencode_video:
             resolved = _resolve_copy_seek(src_path, boundaries, start_index)
             if resolved is not None:
@@ -772,16 +824,12 @@ def _start_job(
                 # with the copied video: accurate_seek would decode-drop
                 # audio up to the *requested* time while copied video
                 # packets flow from the *landing*, leaving the first
-                # segments silent. -copyts pins the timeline the split
-                # times are measured on (no avoid_negative_ts shifting,
-                # whose first-dts normalization is only accurate to within
-                # a B-frame reorder delay).
+                # segments silent.
                 effective_index, seek_target = resolved
                 if seek_target is not None:
                     seek_args = ["-noaccurate_seek", "-ss", f"{seek_target:.6f}"]
                 else:
                     seek_args = []
-                copyts_args = ["-copyts"]
                 reference = boundaries[effective_index]
             else:
                 # Probing unavailable (no ffmpeg? unreadable file?) --
@@ -792,12 +840,21 @@ def _start_job(
                 seek_args = ["-ss", f"{boundaries[start_index] + KEYFRAME_TIME_GUARD:.6f}"]
                 reference = boundaries[start_index] + KEYFRAME_TIME_GUARD
         elif start_index:
-            # Re-encode: the video is decoded, so default accurate_seek
-            # drops decoded frames up to the requested time -- output is
-            # frame-exact at the boundary regardless of where the demuxer
-            # landed, no probing needed.
-            seek_args = ["-ss", f"{boundaries[start_index] + KEYFRAME_TIME_GUARD:.6f}"]
-            reference = boundaries[start_index] + KEYFRAME_TIME_GUARD
+            # Re-encode: the video is decoded, so accurate_seek drops
+            # decoded frames up to the requested time -- output is
+            # frame-exact regardless of where the demuxer landed, no
+            # probing needed. The guard is subtracted here, not added:
+            # accurate_seek keeps frames at-or-after the target, so
+            # aiming just *past* the boundary (as the demux-seek paths
+            # above must) would drop the boundary frame itself and start
+            # the segment one frame late -- and since -segment_times are
+            # measured from the first packet, that one-frame skew would
+            # also push every split target past the keyframe forced
+            # exactly at the next boundary, missing every cut. Verified
+            # against a real encode: boundary-minus-guard starts the
+            # output on the boundary frame exactly.
+            seek_args = ["-ss", f"{boundaries[start_index] - KEYFRAME_TIME_GUARD:.6f}"]
+            reference = boundaries[start_index]
         else:
             seek_args = []
             reference = 0.0
@@ -819,7 +876,9 @@ def _start_job(
         # (see build_playlist) -- the original behavior, kept degraded
         # rather than removed: -ss snaps to whichever keyframe is nearest
         # the grid position, and real segment lengths won't match the
-        # playlist's claimed 6s, but it still plays after a fashion.
+        # playlist's claimed 6s, but it still plays after a fashion (and
+        # better than it used to: under -copyts hls.js at least sees the
+        # real timeline instead of per-segment resets it can't stitch).
         seek_args = ["-ss", str(start_index * SEGMENT_SECONDS)] if start_index else []
         segment_muxer_args = ["-segment_time", str(SEGMENT_SECONDS)]
 
@@ -851,9 +910,15 @@ def _start_job(
     # frame the muxer actually cuts on.
     force_keyframe_args = []
     if reencode_video and boundaries is not None and boundaries[start_index + 1:]:
+        # Absolute times, not relative to the seek: -copyts disables
+        # ffmpeg's -ss timestamp shifting for the whole pipeline, so the
+        # encoder compares these against the source's own clock (verified
+        # against a real encode -- a relative time under -copyts simply
+        # never fires, leaving segments to split at whatever the encoder's
+        # default GOP interval happens to produce).
         force_keyframe_args = [
             "-force_key_frames",
-            ",".join(f"{b - reference:.6f}" for b in boundaries[start_index + 1:]),
+            ",".join(f"{b:.6f}" for b in boundaries[start_index + 1:]),
         ]
 
     pre_input_args = []
@@ -893,14 +958,9 @@ def _start_job(
         "-f", "segment",
         *segment_muxer_args,
         "-segment_start_number", str(effective_index),
-        # Kept deliberately now that EXTINF values are keyframe-accurate:
-        # every segment starting at pts 0 means hls.js places segments
-        # purely by the playlist's (now truthful) durations, and two jobs
-        # producing the same index emit identical timestamps regardless of
-        # where each was seeked from. Continuous source timestamps would
-        # add nothing -- the playlist is already the single source of truth
-        # for the timeline.
-        "-reset_timestamps", "1",
+        # Deliberately NO -reset_timestamps here -- see the -copyts
+        # comment at the top of this function for why per-segment resets
+        # audibly broke audio in real browsers.
         segment_pattern,
     ]
     process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
