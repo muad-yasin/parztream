@@ -1,9 +1,27 @@
-name: Tests
+name: Release
 
+# Runs on a version tag push (v1.2.0 etc.) or manual dispatch (Actions tab ->
+# this workflow -> "Run workflow") -- previously this file (test.yml) ran on
+# every push to master and every PR instead. That gave faster feedback on
+# individual commits, but with no PR-review gate in this project's workflow
+# it was the only thing exercising the suite at all; moved to release-only on
+# a deliberate trade-off (a regression is now only caught at release time,
+# not at the commit that introduced it), a call this project's maintainer
+# made after weighing the (small) per-commit CI cost against that trade-off.
+#
+# The 3 build-*.yml workflows used to trigger independently on the same tag
+# push, with nothing stopping a broken build from being built and attached
+# to a release even if tests would have failed. They're now called here as
+# reusable workflows (`uses:`), gated on `needs: [unit, e2e]` -- a build can
+# no longer happen unless tests already passed. Each build-*.yml keeps its
+# own `workflow_dispatch` trigger too, so a single platform can still be
+# built standalone from the Actions tab without going through this whole
+# pipeline (e.g. to test packaging changes in isolation).
 on:
   push:
-    branches: [master]
-  pull_request:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
 
 jobs:
   unit:
@@ -64,3 +82,21 @@ jobs:
       # addopts to run it explicitly here.
       - name: Run E2E tests
         run: pytest tests/e2e -o addopts="" -v
+
+  build-linux:
+    needs: [unit, e2e]
+    uses: ./.github/workflows/build-linux-appimage.yml
+    permissions:
+      contents: write
+
+  build-macos:
+    needs: [unit, e2e]
+    uses: ./.github/workflows/build-macos-app.yml
+    permissions:
+      contents: write
+
+  build-windows:
+    needs: [unit, e2e]
+    uses: ./.github/workflows/build-windows-exe.yml
+    permissions:
+      contents: write

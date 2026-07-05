@@ -59,10 +59,28 @@ synthetic test video forces a keyframe every second — a static
 byte-identical duplicate for index 1 (segment splits and `-ss` seeks
 both land on keyframes), and real browsers reject that with a decode
 error that has nothing to do with the code under test.
-`.github/workflows/test.yml` runs the unit suite on every push/PR on
-Ubuntu **and** Windows (with real ffmpeg installed, so the
-`requires_ffmpeg` integration tests actually run in CI rather than
-skipping) plus the e2e suite on Ubuntu.
+`.github/workflows/release.yml` runs the unit suite on Ubuntu **and**
+Windows (with real ffmpeg installed, so the `requires_ffmpeg`
+integration tests actually run in CI rather than skipping) plus the
+e2e suite on Ubuntu — but only on a version-tag push or manual
+dispatch, not on every commit/PR the way this file (then named
+`test.yml`) originally did. That's a deliberate trade-off the
+maintainer chose after weighing it explicitly: per-commit CI was cheap
+here (~312 unit tests in well under a minute, all on free GitHub-hosted
+runners) and was this project's only automated check at all, since
+there's no PR-review gate in its actual workflow (solo dev, direct
+pushes to `master`) — moving to release-only means a regression is now
+only caught when a release is cut, not at the commit that introduced
+it, several commits earlier. The upside: tests now genuinely *gate*
+whether a release ships. `build-linux-appimage.yml`/`build-macos-app.yml`/
+`build-windows-exe.yml` used to trigger independently off the same tag
+push, so nothing stopped a broken build from being built and attached
+to a release even if tests would have failed; `release.yml` now calls
+each of them as a reusable workflow (`uses:`, `needs: [unit, e2e]`), so
+a build only happens once tests pass. Each build file keeps its own
+`workflow_dispatch` trigger too, so a single platform can still be
+built standalone from the Actions tab without going through the whole
+pipeline.
 
 ## Architecture
 

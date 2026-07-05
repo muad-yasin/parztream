@@ -1,10 +1,15 @@
 name: Build macOS app
 
-# Runs on a version tag push (v1.2.0 etc.) and attaches the result to the
-# matching GitHub Release. Also runnable manually (Actions tab -> this
-# workflow -> "Run workflow") without a tag, which just uploads the .dmg
-# as a build artifact -- use that to test a build before actually cutting
-# a release.
+# Reached two ways: called by release.yml (as a reusable workflow, via
+# `uses:`) once its test jobs pass on a real version-tag push -- see that
+# file for why tests now gate this rather than the two running
+# independently off the same tag -- or run standalone via manual dispatch
+# (Actions tab -> this workflow -> "Run workflow") to test a macOS build in
+# isolation without going through the whole pipeline. Either way, the
+# "Attach to GitHub release" step below only actually fires on a real tag
+# ref (`github.ref` is inherited correctly from the triggering event even
+# when called via `uses:`); a dispatched run (direct or via release.yml's
+# own workflow_dispatch) just uploads a build artifact.
 #
 # Apple Silicon (arm64) only for now -- see ADVANCED.md's "Building the
 # macOS app" section for why, and for the (real, unavoidable without an
@@ -13,10 +18,8 @@ permissions:
   contents: write
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch: {}
+  workflow_call: {}
 
 jobs:
   build:
