@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-from app import auth, transcode
+from app import auth, config, transcode
 from app.db import get_connection
 
 requires_ffmpeg = pytest.mark.skipif(
@@ -263,7 +263,12 @@ def test_missing_file_on_disk_returns_404(client, make_file):
     assert res.status_code == 404
 
 
-def test_unsupported_video_codec_returns_415(client, make_file):
+def test_unsupported_video_codec_returns_415(client, make_file, monkeypatch):
+    # TRANSCODE_MODE defaults to "auto", whose outcome depends on real
+    # encoder/speed detection on whatever machine runs this suite (see
+    # SOFTWARE_MIN_REALTIME_FACTOR) -- pin it to "off" so this test asserts
+    # the genuinely-unsupported case rather than an environment-dependent one.
+    monkeypatch.setattr(config, "TRANSCODE_MODE", "off")
     f = make_file("clip.mkv", b"not real video data")
     media_id = _insert_media(f, "video", video_codec="hevc", audio_codec="aac")
 
@@ -326,7 +331,8 @@ def test_original_param_serves_source_file_not_remuxed_cache(client, make_file):
     assert res.headers["content-type"] == "video/x-matroska"
 
 
-def test_without_original_param_still_gets_415_as_before(client, make_file):
+def test_without_original_param_still_gets_415_as_before(client, make_file, monkeypatch):
+    monkeypatch.setattr(config, "TRANSCODE_MODE", "off")
     f = make_file("clip.mkv", b"data")
     media_id = _insert_media(f, "video", video_codec="hevc", audio_codec="aac")
 
@@ -391,7 +397,8 @@ def test_hls_playlist_endpoint_404s_for_a_file_that_doesnt_need_remuxing(client,
     assert res.status_code == 400
 
 
-def test_hls_playlist_endpoint_still_415s_for_a_truly_unsupported_codec(client, make_file):
+def test_hls_playlist_endpoint_still_415s_for_a_truly_unsupported_codec(client, make_file, monkeypatch):
+    monkeypatch.setattr(config, "TRANSCODE_MODE", "off")
     f = make_file("clip.mkv", b"not real video data")
     media_id = _insert_media(f, "video", video_codec="hevc", audio_codec="aac", duration=5.0)
 

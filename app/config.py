@@ -132,14 +132,19 @@ TRUSTED_HOSTS = {
 #             from before auto-detection existed. The escape hatch for
 #             anyone who wants a guaranteed-disabled server.
 #   "auto" -- unset, empty, or literal "auto" (the default). Lazily
-#             benchmarks (see encoder_detect.is_hardware_transcode_capable)
-#             the *first* real hardware encoder detected, on the first file
-#             that actually needs one, and only auto-enables if it's fast
-#             enough for real-time HLS re-encoding. The libopenh264 software
-#             fallback never auto-enables regardless of benchmarked speed --
-#             it's pure CPU load with no hardware offload, exactly the
-#             resource-exhaustion risk (NAS boxes, old laptops, Raspberry
-#             Pi) this whole feature exists to protect weak hardware from.
+#             benchmarks (see encoder_detect.is_transcode_capable) whichever
+#             encoder was detected first, on the first file that actually
+#             needs one, and only auto-enables if it's fast enough for
+#             real-time HLS re-encoding. Hardware and the libopenh264
+#             software fallback are held to different real-time bars
+#             (MIN_REALTIME_FACTOR vs. the lower SOFTWARE_MIN_REALTIME_FACTOR
+#             in app/encoder_detect.py) -- software used to never auto-enable
+#             at all regardless of speed, but that made "auto" indistinguishable
+#             from "off" on any machine without a working hardware encoder,
+#             which turned out to be the common case for this project's
+#             actual home-LAN audience, not the edge case. Genuinely
+#             underpowered boxes (old NAS, Raspberry Pi) still won't clear
+#             the software bar and correctly stay disabled.
 # A mistyped value (e.g. "tur") fails loudly rather than silently landing in
 # "auto" -- unlike a bad default, "auto" now has a real consequence (it can
 # spawn genuine transcode jobs), so it deserves the same treatment

@@ -186,6 +186,22 @@ def _try_encode(name: str) -> bool:
 # config just in case" convention).
 MIN_REALTIME_FACTOR = 2.0
 
+# Same idea, lower bar, for the libopenh264 software fallback. Originally this
+# case just returned False unconditionally -- "pure CPU load with no hardware
+# offload" was the reasoning -- but in practice that means "auto" mode is
+# indistinguishable from "off" on any machine without a working hardware
+# encoder, which turned out to be the common case, not the edge case, for
+# this project's actual home-LAN/NAS-without-a-real-GPU audience: it silently
+# hard-fails every HEVC/AV1 file with no indication that setting
+# PARZTREAM_ENABLE_TRANSCODE=1 would fix it. A lower bar than hardware's 2.0x
+# (still meaningfully above 1.0x, for the same seek/thumbnail/concurrent-job
+# headroom reasoning as MIN_REALTIME_FACTOR) lets "auto" actually enable
+# software transcoding on hardware that's fast enough to sustain it, while
+# still refusing on genuinely underpowered boxes (old NAS, Raspberry Pi) where
+# it would just produce stuttering playback -- those still need to fall back
+# to the download link, same as before.
+SOFTWARE_MIN_REALTIME_FACTOR = 1.2
+
 # 1080p, since app/transcode.py's _scale_args already caps real re-encodes at
 # 1080p and never upscales -- benchmarking near the real ceiling a re-encode
 # job would actually hit, not the trivial 64x64 existence-check size
@@ -232,12 +248,14 @@ def _measure_encode_seconds(pre_input_args, video_args):
     return time.monotonic() - start
 
 
-def is_hardware_transcode_capable() -> bool:
-    """True if a real hardware encoder (never the libopenh264 software
-    fallback -- see MIN_REALTIME_FACTOR's docstring for why) was detected on
-    this machine AND benchmarks fast enough for real-time HLS re-encoding.
-    Cached for the life of the process, same double-checked-locking pattern
-    as get_encoder() (whose own cache this reuses -- no re-probing for
+def is_transcode_capable() -> bool:
+    """True if a working encoder (hardware, or the libopenh264 software
+    fallback) was detected on this machine AND benchmarks fast enough for
+    real-time HLS re-encoding. Hardware and software are held to different
+    bars -- MIN_REALTIME_FACTOR vs. the lower SOFTWARE_MIN_REALTIME_FACTOR,
+    see that constant's docstring for why software isn't excluded outright
+    anymore. Cached for the life of the process, same double-checked-locking
+    pattern as get_encoder() (whose own cache this reuses -- no re-probing for
     existence, only the new speed benchmark is added on top)."""
     global _auto_capable
     if _auto_capable is not _UNSET_CAPABLE:
@@ -250,7 +268,7 @@ def is_hardware_transcode_capable() -> bool:
 
 def _check_capable() -> bool:
     encoder = get_encoder()
-    if encoder is None or encoder == SOFTWARE_FALLBACK:
+    if encoder is None:
         return False
 
     pre_input_args, video_args = encode_video_args(encoder, None, None)
@@ -262,8 +280,9 @@ def _check_capable() -> bool:
         logger.info("Transcode auto-detection: %s benchmark failed or timed out -- leaving transcoding disabled", encoder)
         return False
 
+    required = SOFTWARE_MIN_REALTIME_FACTOR if encoder == SOFTWARE_FALLBACK else MIN_REALTIME_FACTOR
     factor = _BENCHMARK_CLIP_SECONDS / elapsed
-    capable = factor >= MIN_REALTIME_FACTOR
+    capable = factor >= required
     if capable:
         logger.info(
             "Transcode auto-detection: %s encodes at %.1fx real-time -- enabling automatic transcoding",
@@ -273,6 +292,6 @@ def _check_capable() -> bool:
         logger.info(
             "Transcode auto-detection: %s only encodes at %.1fx real-time (need >= %.1fx) -- "
             "leaving transcoding disabled; set PARZTREAM_ENABLE_TRANSCODE=1 to force it anyway",
-            encoder, factor, MIN_REALTIME_FACTOR,
+            encoder, factor, required,
         )
     return capable

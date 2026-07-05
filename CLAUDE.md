@@ -462,11 +462,15 @@ pipeline.
   instead of `UnsupportedVideoCodec`, exactly this project's original
   opt-in-only behavior before auto-detection existed, never
   second-guessed by a speed check. In `"auto"` mode (the default), the
-  same branch instead calls `encoder_detect.is_hardware_transcode_capable()`
-  — a *hardware* encoder must both be detected and benchmark fast enough
-  for real-time re-encoding before auto-enabling; the software fallback
-  never auto-enables regardless of benchmarked speed (see
-  `app/encoder_detect.py`, below). In `"off"` mode, neither function is
+  same branch instead calls `encoder_detect.is_transcode_capable()`
+  — whichever encoder was detected (hardware or the software fallback)
+  must benchmark fast enough for real-time re-encoding before
+  auto-enabling; software is held to a lower real-time bar than hardware
+  (see `app/encoder_detect.py`, below — this used to exclude software
+  outright regardless of benchmarked speed, until that turned out to make
+  `"auto"` behave identically to `"off"` on any machine without a working
+  hardware encoder, which is the common case for this project's actual
+  home-LAN audience, not the edge case). In `"off"` mode, neither function is
   ever called. Once re-encoding is confirmed either way, `_start_job`
   swaps `-c:v copy` for `-c:v <encoder> -vf scale=...` plus
   `-force_key_frames` at every segment boundary — the encoder must
@@ -526,7 +530,7 @@ pipeline.
   inventory hasn't been spot-checked against what this module assumes
   — flag this if you touch it, don't quietly treat it as confirmed.
 
-  **`is_hardware_transcode_capable()`** — the auto-detection layer on top
+  **`is_transcode_capable()`** — the auto-detection layer on top
   of `get_encoder()`, used only by `config.TRANSCODE_MODE == "auto"`
   (`app/transcode.py`). `get_encoder()` only proves an encoder *works* (a
   trivial 64×64, 1-frame synthetic encode, pass/fail on `returncode`) —
@@ -534,33 +538,44 @@ pipeline.
   3-second synthetic clip (`_measure_encode_seconds`, built via the same
   `encode_video_args()` a real segment job uses, so the benchmark measures
   the identical ffmpeg command shape) and requiring `MIN_REALTIME_FACTOR`
-  (2.0×, a starting judgment call, not a measured constant — a live HLS
-  segment job has real overhead beyond pure encode throughput that a bare
-  1.0× benchmark leaves no room for at all: segment muxing, a concurrent
-  seek spinning up a second job, another device's thumbnail work). Returns
-  `False` immediately, without ever spawning a benchmark subprocess, when
-  `get_encoder()` found nothing or found only `SOFTWARE_FALLBACK` —
-  software encoding never auto-enables regardless of how fast it
-  benchmarks, since it's pure CPU load with no hardware offload, exactly
-  the resource-exhaustion risk (NAS boxes, old laptops, Raspberry Pi) this
-  whole feature exists to protect against; it stays available only via
-  explicit `"on"` mode. Cached for the process lifetime with the same
-  double-checked-locking pattern as `get_encoder()` (a separate lock/
-  sentinel — reuses `get_encoder()`'s own cache rather than re-probing
-  existence). Same lazy timing as `get_encoder()` and for the same reason
-  (`app/transcode.py`'s `needs_segment_boundaries` deliberately treats
-  `"auto"` the same as `"off"`, so a scan can never trigger this
-  benchmark either — see that function's docstring). Logs its outcome via
-  `logger.info` the first time it runs (visible in server logs whenever
-  the first incompatible file is actually played, not at startup, since
-  there's no equivalent of `app/main.py`'s `AUTH_PIN`/`SECRET_KEY`
-  startup-warning pattern here — that's intentional, not an oversight).
-  **Unverified, same caveat as `get_encoder()` above**: this benchmark has
-  only ever been exercised with mocked encode timings (no GPU available
-  in this project's dev environment), so `MIN_REALTIME_FACTOR`'s 2.0×
-  threshold hasn't been validated against real hardware-encoder
-  throughput — flag this if you touch it or tune the threshold, don't
-  quietly treat it as confirmed.
+  for a hardware encoder (2.0×) or the lower `SOFTWARE_MIN_REALTIME_FACTOR`
+  for `SOFTWARE_FALLBACK` (1.2×) — both a starting judgment call, not a
+  measured constant — a live HLS segment job has real overhead beyond pure
+  encode throughput that a bare 1.0× benchmark leaves no room for at all:
+  segment muxing, a concurrent seek spinning up a second job, another
+  device's thumbnail work. **This used to reject `SOFTWARE_FALLBACK`
+  outright, before any benchmark, regardless of speed** — the reasoning at
+  the time was that software encoding is pure CPU load with no hardware
+  offload, exactly the resource-exhaustion risk (NAS boxes, old laptops,
+  Raspberry Pi) this whole feature exists to protect against. In practice
+  that made `"auto"` behave identically to `"off"` on any machine without a
+  working hardware encoder — confirmed live: a real home-LAN box with an
+  AMD iGPU whose VAAPI driver reports no usable H.264 encode profile landed
+  on `libopenh264` from `get_encoder()`, then hit the blanket software
+  rejection, so *every* HEVC/AV1 file in a real media library hard-failed
+  with `UnsupportedVideoCodec` even though `libopenh264` benchmarked at
+  3.5× real-time on that same box — comfortably fast enough to actually
+  serve HLS. Weak hardware (an underpowered NAS, a Raspberry Pi) still
+  correctly stays disabled, just via the speed bar now instead of a
+  blanket ban — see `SOFTWARE_MIN_REALTIME_FACTOR`'s docstring. Cached for
+  the process lifetime with the same double-checked-locking pattern as
+  `get_encoder()` (a separate lock/sentinel — reuses `get_encoder()`'s own
+  cache rather than re-probing existence). Same lazy timing as
+  `get_encoder()` and for the same reason (`app/transcode.py`'s
+  `needs_segment_boundaries` deliberately treats `"auto"` the same as
+  `"off"`, so a scan can never trigger this benchmark either — see that
+  function's docstring). Logs its outcome via `logger.info` the first time
+  it runs (visible in server logs whenever the first incompatible file is
+  actually played, not at startup, since there's no equivalent of
+  `app/main.py`'s `AUTH_PIN`/`SECRET_KEY` startup-warning pattern here —
+  that's intentional, not an oversight).
+  **Unverified claim narrowed, rest still stands**: the hardware-encoder
+  hasn't been confirmed on real hardware (no GPU with a working encode
+  profile has been available in any dev/test environment so far), but the
+  *software* path's benchmark-based auto-enable **has** now been confirmed
+  against a real machine (see above) — don't extend the old blanket
+  "unverified" caveat to the software fallback anymore, only to the
+  hardware candidates.
 - `app/auth.py` — `SessionAuthMiddleware`, a pure ASGI middleware (not
   `BaseHTTPMiddleware`, which buffers `StreamingResponse` bodies —
   that would hurt streaming large files). Replaced `BasicAuthMiddleware`

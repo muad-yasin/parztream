@@ -244,18 +244,17 @@ By default, a video whose codec itself can't be decoded by a browser
 which has three modes:
 
 - **Auto-detect (the default, unset or `auto`).** The first time such a
-  file is actually played, parztream checks for a real hardware encoder
-  (Intel Quick Sync, NVIDIA NVENC, AMD AMF/VCE, VAAPI, or Apple
-  VideoToolbox, depending on platform) and benchmarks it against a
-  representative clip. If it encodes comfortably faster than real time,
-  transcoding turns itself on automatically — no configuration needed. If
-  no hardware encoder is found, or the one found isn't fast enough, the
-  file falls back to download-only, exactly as if transcoding were off.
-  The software-only fallback (`libopenh264`) is deliberately **never**
-  auto-enabled, however fast it benchmarks — it's pure CPU load with no
-  hardware offload, which is exactly the risk this auto-detection exists
-  to protect weaker hardware (NAS boxes, old laptops, Raspberry Pi via the
-  Linux build) from.
+  file is actually played, parztream checks for a working encoder (Intel
+  Quick Sync, NVIDIA NVENC, AMD AMF/VCE, VAAPI, or Apple VideoToolbox,
+  depending on platform, falling back to the software-only `libopenh264`
+  if none of those work) and benchmarks it against a representative clip.
+  If it encodes comfortably faster than real time, transcoding turns
+  itself on automatically — no configuration needed. Software is held to
+  a lower real-time bar than hardware, since it has no offload but still
+  needs to sustain real-time HLS re-encoding without stuttering; a
+  genuinely underpowered box (NAS, old laptop, Raspberry Pi via the Linux
+  build) won't clear even that lower bar and correctly falls back to
+  download-only, exactly as if transcoding were off.
 - **Always on (`1`/`true`/`yes`).** Skips the speed benchmark entirely —
   if *any* working encoder is found (hardware or the software fallback),
   it's used, exactly like this project's original opt-in-only behavior

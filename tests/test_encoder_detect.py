@@ -250,19 +250,26 @@ def test_capable_is_false_when_no_encoder_detected_at_all(monkeypatch):
     called = []
     monkeypatch.setattr(encoder_detect, "_measure_encode_seconds", lambda *a: called.append(True))
 
-    assert encoder_detect.is_hardware_transcode_capable() is False
+    assert encoder_detect.is_transcode_capable() is False
     assert called == []  # never even attempts a benchmark with nothing to benchmark
 
 
-def test_capable_is_false_for_software_fallback_regardless_of_speed(monkeypatch):
-    # The core of decision 3: libopenh264 never auto-enables no matter how
-    # fast it benchmarks -- it's pure CPU load with no hardware offload.
+def test_capable_is_true_for_fast_software_fallback(monkeypatch):
+    # Software is held to a lower bar than hardware (SOFTWARE_MIN_REALTIME_FACTOR
+    # vs. MIN_REALTIME_FACTOR) but does get benchmarked and can auto-enable --
+    # unlike the original all-or-nothing "never" behavior.
     monkeypatch.setattr(encoder_detect, "get_encoder", lambda: encoder_detect.SOFTWARE_FALLBACK)
-    called = []
-    monkeypatch.setattr(encoder_detect, "_measure_encode_seconds", lambda *a: called.append(True))
+    monkeypatch.setattr(encoder_detect, "_measure_encode_seconds", lambda *a: 1.5)
 
-    assert encoder_detect.is_hardware_transcode_capable() is False
-    assert called == []  # never benchmarks the software fallback at all
+    assert encoder_detect.is_transcode_capable() is True
+
+
+def test_capable_is_false_for_too_slow_software_fallback(monkeypatch):
+    monkeypatch.setattr(encoder_detect, "get_encoder", lambda: encoder_detect.SOFTWARE_FALLBACK)
+    # Clears the bare 1.0x line but not SOFTWARE_MIN_REALTIME_FACTOR (1.2x).
+    monkeypatch.setattr(encoder_detect, "_measure_encode_seconds", lambda *a: encoder_detect._BENCHMARK_CLIP_SECONDS / 1.05)
+
+    assert encoder_detect.is_transcode_capable() is False
 
 
 def test_capable_is_true_for_fast_hardware_encoder(monkeypatch):
@@ -271,7 +278,7 @@ def test_capable_is_true_for_fast_hardware_encoder(monkeypatch):
     # comfortably above MIN_REALTIME_FACTOR.
     monkeypatch.setattr(encoder_detect, "_measure_encode_seconds", lambda *a: 0.5)
 
-    assert encoder_detect.is_hardware_transcode_capable() is True
+    assert encoder_detect.is_transcode_capable() is True
 
 
 def test_capable_is_false_for_too_slow_hardware_encoder(monkeypatch):
@@ -281,14 +288,14 @@ def test_capable_is_false_for_too_slow_hardware_encoder(monkeypatch):
     # MIN_REALTIME_FACTOR.
     monkeypatch.setattr(encoder_detect, "_measure_encode_seconds", lambda *a: encoder_detect._BENCHMARK_CLIP_SECONDS * 2)
 
-    assert encoder_detect.is_hardware_transcode_capable() is False
+    assert encoder_detect.is_transcode_capable() is False
 
 
 def test_capable_is_false_when_benchmark_fails_or_times_out(monkeypatch):
     monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "h264_nvenc")
     monkeypatch.setattr(encoder_detect, "_measure_encode_seconds", lambda *a: None)
 
-    assert encoder_detect.is_hardware_transcode_capable() is False
+    assert encoder_detect.is_transcode_capable() is False
 
 
 def test_capable_result_is_cached_benchmark_runs_once(monkeypatch):
@@ -301,8 +308,8 @@ def test_capable_result_is_cached_benchmark_runs_once(monkeypatch):
 
     monkeypatch.setattr(encoder_detect, "_measure_encode_seconds", fake_measure)
 
-    first = encoder_detect.is_hardware_transcode_capable()
-    second = encoder_detect.is_hardware_transcode_capable()
+    first = encoder_detect.is_transcode_capable()
+    second = encoder_detect.is_transcode_capable()
 
     assert first is second is True
     assert call_count["n"] == 1

@@ -112,7 +112,13 @@ def test_unknown_codec_info_falls_back_to_direct_play(tmp_path):
     mock_popen.assert_not_called()
 
 
-def test_incompatible_video_codec_raises(tmp_path):
+def test_incompatible_video_codec_raises(tmp_path, monkeypatch):
+    # TRANSCODE_MODE defaults to "auto", whose outcome now genuinely depends
+    # on this machine's real hardware/software encoder speed (see
+    # SOFTWARE_MIN_REALTIME_FACTOR) -- pin it to "off" so this test stays
+    # portable across ffmpeg builds/platforms instead of depending on
+    # whatever encoder happens to be available in the environment it runs in.
+    monkeypatch.setattr(config, "TRANSCODE_MODE", "off")
     f = tmp_path / "clip.mkv"
     f.write_bytes(b"x")
     row = _row(path=str(f), video_codec="hevc", audio_codec="aac")
@@ -1400,7 +1406,7 @@ def test_transcode_on_never_calls_capability_benchmark(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "TRANSCODE_MODE", "on")
     monkeypatch.setattr(encoder_detect, "get_encoder", lambda: "libopenh264")
     called = []
-    monkeypatch.setattr(encoder_detect, "is_hardware_transcode_capable", lambda: called.append(True))
+    monkeypatch.setattr(encoder_detect, "is_transcode_capable", lambda: called.append(True))
     f = tmp_path / "clip.mkv"
     f.write_bytes(b"x")
     row = _row(path=str(f), video_codec="hevc", audio_codec="aac")
@@ -1412,7 +1418,7 @@ def test_transcode_on_never_calls_capability_benchmark(tmp_path, monkeypatch):
 
 def test_incompatible_codec_with_transcode_auto_and_capable_hardware_needs_hls_remux(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "TRANSCODE_MODE", "auto")
-    monkeypatch.setattr(encoder_detect, "is_hardware_transcode_capable", lambda: True)
+    monkeypatch.setattr(encoder_detect, "is_transcode_capable", lambda: True)
     f = tmp_path / "clip.mkv"
     f.write_bytes(b"x")
     row = _row(path=str(f), video_codec="hevc", audio_codec="ac3")
@@ -1425,7 +1431,7 @@ def test_incompatible_codec_with_transcode_auto_and_capable_hardware_needs_hls_r
 
 def test_incompatible_codec_with_transcode_auto_and_incapable_hardware_raises_unsupported(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "TRANSCODE_MODE", "auto")
-    monkeypatch.setattr(encoder_detect, "is_hardware_transcode_capable", lambda: False)
+    monkeypatch.setattr(encoder_detect, "is_transcode_capable", lambda: False)
     f = tmp_path / "clip.mkv"
     f.write_bytes(b"x")
     row = _row(path=str(f), video_codec="hevc", audio_codec="aac")
@@ -1436,12 +1442,12 @@ def test_incompatible_codec_with_transcode_auto_and_incapable_hardware_raises_un
 
 
 def test_transcode_auto_never_calls_plain_get_encoder(tmp_path, monkeypatch):
-    # "auto" must route entirely through is_hardware_transcode_capable(),
+    # "auto" must route entirely through is_transcode_capable(),
     # never the plain existence-only get_encoder() -- otherwise a slow
     # hardware encoder (or the software fallback) could get auto-enabled
     # without ever being benchmarked.
     monkeypatch.setattr(config, "TRANSCODE_MODE", "auto")
-    monkeypatch.setattr(encoder_detect, "is_hardware_transcode_capable", lambda: False)
+    monkeypatch.setattr(encoder_detect, "is_transcode_capable", lambda: False)
     called = []
     monkeypatch.setattr(encoder_detect, "get_encoder", lambda: called.append(True))
     f = tmp_path / "clip.mkv"

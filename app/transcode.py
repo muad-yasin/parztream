@@ -224,11 +224,12 @@ def resolve_playable_path(row) -> Path:
         #   "on"   -- always attempt it if any working encoder is detected
         #             (hardware or the libopenh264 software fallback),
         #             exactly this project's original opt-in-only behavior.
-        #   "auto" -- only attempt it if a *hardware* encoder is detected
-        #             AND benchmarks fast enough for real-time HLS
-        #             re-encoding (encoder_detect.is_hardware_transcode_capable) --
-        #             software encoding never auto-enables regardless of
-        #             speed, see that function's docstring for why.
+        #   "auto" -- only attempt it if whatever encoder was detected
+        #             (hardware or software) benchmarks fast enough for
+        #             real-time HLS re-encoding (encoder_detect.is_transcode_capable)
+        #             -- software is held to a lower bar than hardware
+        #             (SOFTWARE_MIN_REALTIME_FACTOR vs. MIN_REALTIME_FACTOR),
+        #             see that constant's docstring for why.
         #   "off"  -- never call app/encoder_detect.py at all (no probing
         #             subprocesses spawned) -- exactly today's dead end
         #             (download-only), unchanged from before auto-detection
@@ -241,7 +242,7 @@ def resolve_playable_path(row) -> Path:
                 raise NeedsHlsRemux(remux_audio=not audio_ok, reencode_video=True)
             raise UnsupportedVideoCodec(video_codec, transcode_enabled=True)
         if config.TRANSCODE_MODE == "auto":
-            if encoder_detect.is_hardware_transcode_capable():
+            if encoder_detect.is_transcode_capable():
                 raise NeedsHlsRemux(remux_audio=not audio_ok, reencode_video=True)
             raise UnsupportedVideoCodec(video_codec, transcode_enabled=False)
         raise UnsupportedVideoCodec(video_codec, transcode_enabled=False)
@@ -290,7 +291,7 @@ def needs_segment_boundaries(path: Path, video_codec, audio_codec, audio_channel
     deliberate difference: the re-encode branch only ever returns True for
     config.TRANSCODE_MODE == "on", never "auto" (even though "auto" might
     end up enabling re-encoding too) -- both encoder_detect.get_encoder()
-    and is_hardware_transcode_capable() spawn probing subprocesses and are
+    and is_transcode_capable() spawn probing subprocesses and are
     deliberately lazy (first real transcode request, see
     app/encoder_detect.py), and a scan must not be the thing that triggers
     either. Worst case of treating "auto" like "off" here is one wasted
