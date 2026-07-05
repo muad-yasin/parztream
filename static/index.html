@@ -84,6 +84,12 @@
        for why that order is load-bearing); only iOS Safari, which has no
        MSE, uses its native support instead. -->
   <script src="/hls.min.js"></script>
+  <!-- Deliberate exception to the "everything vendored, no CDN" rule above:
+       Google's Cast Web Sender SDK terms prohibit self-hosting it, so this
+       one script must load from Google's own CDN. Only the sender's browser
+       tab needs internet access for this -- once a cast session starts, the
+       actual media bytes flow LAN-only, straight from this server to the TV. -->
+  <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
   <script src="/app.js"></script>
 </body>
 </html>

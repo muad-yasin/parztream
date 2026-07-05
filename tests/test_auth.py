@@ -241,3 +241,42 @@ def test_configured_extra_trusted_host_is_accepted(client, monkeypatch):
 def test_public_ip_host_is_rejected(client):
     res = client.get("/api/library", headers={"host": "8.8.8.8"})
     assert res.status_code == 400
+
+
+def test_cast_token_round_trips_for_the_correct_media_id():
+    token = auth.create_cast_token(42)
+    assert auth.verify_cast_token(token, 42) is True
+
+
+def test_cast_token_rejected_for_a_different_media_id():
+    token = auth.create_cast_token(1)
+    assert auth.verify_cast_token(token, 2) is False
+
+
+def test_cast_token_rejected_when_tampered():
+    token = auth.create_cast_token(1)
+    assert auth.verify_cast_token(token + "x", 1) is False
+
+
+def test_cast_token_rejected_when_expired(monkeypatch):
+    monkeypatch.setattr(auth, "CAST_TOKEN_MAX_AGE", -1)
+    token = auth.create_cast_token(1)
+    assert auth.verify_cast_token(token, 1) is False
+
+
+def test_cast_token_cannot_be_used_as_a_session_cookie():
+    # Proves the salt-isolation property directly: create_cast_token and
+    # create_session_cookie_value derive from the same SECRET_KEY but use
+    # separate itsdangerous serializer salts, so one can never be replayed
+    # as the other even if intercepted.
+    token = auth.create_cast_token(1)
+    assert auth.verify_session_cookie_value(token) is False
+
+
+def test_untrusted_host_is_rejected_even_with_a_valid_cast_token(client, monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PIN", "1234")
+    token = auth.create_cast_token(1)
+    res = client.get(
+        "/api/stream/1", headers={"host": "evil.example.com"}, params={"cast_token": token},
+    )
+    assert res.status_code == 400

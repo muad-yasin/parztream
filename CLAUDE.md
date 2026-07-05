@@ -753,6 +753,46 @@ skipping) plus the e2e suite on Ubuntu.
     Screen" behavior) has been verified on a real phone — same caveat
     as the accessibility work above, built correct against the
     relevant web platform APIs and reviewed, not device-tested.
+
+  **TV casting (Google Cast + AirPlay):** a Cast button (`static/app.js`'s
+  `castMedia`) lets `playMedia`'s existing sender-side player act as a
+  remote control for a Chromecast/Google TV/Android TV device — the
+  browser tab stays the sender, the TV's own default media receiver
+  fetches the stream URL and plays it directly, using Google's
+  Cast Web Sender SDK (`static/index.html` loads
+  `https://www.gstatic.com/cv/js/sender/v1/cast_sender.js` — the one
+  deliberate exception to this project's "everything vendored, no CDN"
+  rule, since Google's terms don't allow self-hosting it; only the
+  sender's browser tab needs internet access for this, the actual media
+  bytes still flow LAN-only once casting starts). Since a Cast receiver
+  has no cookie jar and can't present the session cookie
+  `SessionAuthMiddleware` normally requires, `app/auth.py` mints a
+  short-lived, single-media signed token (`create_cast_token`/
+  `verify_cast_token`, a separate `itsdangerous` serializer/salt from the
+  session cookie's, so one can never be replayed as the other) via
+  `POST /api/cast-token/{id}` — reachable only by an already-authenticated
+  sender — and the middleware accepts `?cast_token=` as an alternative to
+  the cookie, but only for the exact stream/HLS path shapes matched by
+  `CAST_STREAM_PATH_RE`, never any other route. Chromecast's default
+  receiver doesn't support the Matroska container at all (unlike this
+  app's own `<video>` player, which can direct-play many `.mkv` files), so
+  `castMedia` forces the HLS remux path for casting whenever the source
+  is `.mkv`, regardless of what the in-browser compatibility probe
+  decided for local playback.
+  **AirPlay needed no new code**: nothing in this codebase sets
+  `disableRemotePlayback`, so Safari's native AirPlay picker on
+  `<video>`/`<audio>` and Chrome/Android's Remote Playback API picker
+  should already work today.
+  **Unverified**: no real Chromecast/Google TV/Android TV/Apple TV
+  hardware was available while building this — the token minting/
+  validation round-trips correctly under test, and the Cast SDK
+  script/button load without breaking any existing flow (confirmed via
+  `tests/e2e`), but actual on-device Cast session negotiation and
+  receiver playback have not been verified end-to-end, matching this
+  project's existing disclosure convention for platform work built
+  without access to the real hardware (see the Windows/macOS packaging
+  sections above). Re-verify here if real Cast/AirPlay hardware becomes
+  available, rather than assuming this works as built.
 - `deploy/` — templates for running as a persistent background
   service (systemd unit + env-file template for Linux, a batch
   script + env-file template for Windows), documented in the

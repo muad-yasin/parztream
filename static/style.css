@@ -446,6 +446,17 @@ main {
   background: rgba(20, 22, 26, 0.85);
 }
 
+/* Sits to the left of the close button (.dismiss-btn-overlay's own top/right
+   corner) rather than stacking on top of it -- both are absolutely
+   positioned over the same video/audio element. */
+.cast-btn {
+  right: 3.25rem;
+  width: auto;
+  padding: 0 0.75rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+}
+
 ul#media-list {
   list-style: none;
   margin: 0;

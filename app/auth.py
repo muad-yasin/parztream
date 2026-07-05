@@ -1,8 +1,9 @@
 import ipaddress
+import re
 import secrets
 import time
 from http.cookies import SimpleCookie
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from starlette.datastructures import Headers
@@ -32,6 +33,18 @@ PUBLIC_PATHS = {
 }
 
 _serializer = URLSafeTimedSerializer(SECRET_KEY, salt="parztream-session")
+
+# A separate serializer instance/salt from _serializer above -- itsdangerous
+# binds the salt into the signature itself, so a cast token can never be
+# replayed as a session cookie (or vice versa) even though both derive from
+# the same SECRET_KEY. See create_cast_token/verify_cast_token: this exists
+# so a Chromecast/Google TV receiver, which has no cookie jar at all, can
+# still authenticate to /api/stream/* for one specific media item without
+# granting it (or anyone who intercepts the URL) broader session access.
+_cast_serializer = URLSafeTimedSerializer(SECRET_KEY, salt="parztream-cast-token")
+CAST_TOKEN_MAX_AGE = 60 * 60 * 4  # a full movie plus slack, deliberately bounded
+
+CAST_STREAM_PATH_RE = re.compile(r"^/api/stream/(\d+)(?:/hls/.+)?$")
 
 # A 4-digit PIN only has 10,000 possibilities, so unlike a real password it
 # needs throttling to not be trivially brute-forceable over a fast LAN
@@ -91,6 +104,18 @@ def verify_session_cookie_value(value: str) -> bool:
         return _serializer.loads(value, max_age=SESSION_MAX_AGE) == _SESSION_VALUE
     except (BadSignature, SignatureExpired):
         return False
+
+
+def create_cast_token(media_id: int) -> str:
+    return _cast_serializer.dumps({"media_id": media_id})
+
+
+def verify_cast_token(value: str, media_id: int) -> bool:
+    try:
+        payload = _cast_serializer.loads(value, max_age=CAST_TOKEN_MAX_AGE)
+    except (BadSignature, SignatureExpired):
+        return False
+    return payload.get("media_id") == media_id
 
 
 def _is_trusted_host(raw_host: str) -> bool:
@@ -161,6 +186,20 @@ class SessionAuthMiddleware:
         if cookie_value and verify_session_cookie_value(cookie_value):
             await self.app(scope, receive, send)
             return
+
+        # Lets an already-authenticated sender (see POST /api/cast-token)
+        # hand a Cast/Google TV receiver -- which has no cookie jar at all --
+        # a URL it can fetch on its own. Scoped tightly to the stream/HLS
+        # path shapes and to the exact media_id the token was minted for, so
+        # a leaked/intercepted cast URL can never be reused to reach any
+        # other route (e.g. /api/setup/browse) or any other media item.
+        match = CAST_STREAM_PATH_RE.match(scope["path"])
+        if match:
+            query = parse_qs(scope.get("query_string", b"").decode())
+            token = query.get("cast_token", [None])[0]
+            if token and verify_cast_token(token, int(match.group(1))):
+                await self.app(scope, receive, send)
+                return
 
         if "text/html" in headers.get("accept", ""):
             # A real page navigation (not a fetch()/<img>/<video> request,

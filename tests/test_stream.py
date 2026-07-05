@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-from app import transcode
+from app import auth, transcode
 from app.db import get_connection
 
 requires_ffmpeg = pytest.mark.skipif(
@@ -131,6 +131,113 @@ def test_malformed_range_header_returns_416(client, make_file):
 def test_unknown_media_id_returns_404(client):
     res = client.get("/api/stream/999")
     assert res.status_code == 404
+
+
+def test_cast_token_endpoint_mints_a_token_for_a_valid_media_id(client, make_file):
+    f = make_file("clip.mp4", b"data")
+    media_id = _insert_media(f, "video")
+
+    res = client.post(f"/api/cast-token/{media_id}")
+
+    assert res.status_code == 200
+    assert res.json()["token"]
+
+
+def test_cast_token_endpoint_404s_for_unknown_media_id(client):
+    res = client.post("/api/cast-token/999")
+    assert res.status_code == 404
+
+
+def test_stream_route_accepts_valid_cast_token_when_pin_set(client, make_file, monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PIN", "1234")
+    content = b"x" * 100
+    f = make_file("clip.mp4", content)
+    media_id = _insert_media(f, "video")
+    token = auth.create_cast_token(media_id)
+
+    # No session cookie at all -- this is the actual bug being fixed: a Cast
+    # receiver has no cookie jar and could never authenticate otherwise.
+    res = client.get(f"/api/stream/{media_id}", params={"cast_token": token})
+
+    assert res.status_code == 200
+    assert res.content == content
+
+
+def test_stream_route_rejects_cast_token_minted_for_a_different_media_id(client, make_file, monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PIN", "1234")
+    f1 = make_file("clip1.mp4", b"one")
+    f2 = make_file("clip2.mp4", b"two")
+    media_id_1 = _insert_media(f1, "video")
+    media_id_2 = _insert_media(f2, "video")
+    token = auth.create_cast_token(media_id_1)
+
+    res = client.get(f"/api/stream/{media_id_2}", params={"cast_token": token})
+
+    assert res.status_code == 401
+
+
+def test_stream_route_rejects_tampered_cast_token(client, make_file, monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PIN", "1234")
+    f = make_file("clip.mp4", b"data")
+    media_id = _insert_media(f, "video")
+    token = auth.create_cast_token(media_id)
+
+    res = client.get(f"/api/stream/{media_id}", params={"cast_token": token + "x"})
+
+    assert res.status_code == 401
+
+
+def test_stream_route_rejects_expired_cast_token(client, make_file, monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PIN", "1234")
+    monkeypatch.setattr(auth, "CAST_TOKEN_MAX_AGE", -1)
+    f = make_file("clip.mp4", b"data")
+    media_id = _insert_media(f, "video")
+    token = auth.create_cast_token(media_id)
+
+    res = client.get(f"/api/stream/{media_id}", params={"cast_token": token})
+
+    assert res.status_code == 401
+
+
+def test_cast_token_does_not_grant_access_to_unrelated_routes(client, make_file, monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PIN", "1234")
+    f = make_file("clip.mp4", b"data")
+    media_id = _insert_media(f, "video")
+    token = auth.create_cast_token(media_id)
+
+    # A cast token is scoped to /api/stream/* only, by design -- confirms it
+    # can't be reused as a general-purpose bearer credential for other
+    # routes just because it's a valid signed value.
+    res = client.get("/api/library", params={"cast_token": token})
+
+    assert res.status_code == 401
+
+
+def test_hls_playlist_route_accepts_cast_token(client, make_file, monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PIN", "1234")
+    f = make_file("clip.mkv", b"not real video data")
+    # duration=None deliberately -- matches
+    # test_hls_playlist_endpoint_errors_cleanly_when_duration_unknown, which
+    # asserts this exact combination gets a clean 500 with no auth involved.
+    # The point here is only that it's not a 401 -- i.e. the cast token was
+    # accepted and the request actually reached the route handler.
+    media_id = _insert_media(f, "video", video_codec="h264", audio_codec="aac", duration=None)
+    token = auth.create_cast_token(media_id)
+
+    res = client.get(f"/api/stream/{media_id}/hls/playlist.m3u8", params={"cast_token": token})
+
+    assert res.status_code == 500
+    assert res.status_code != 401
+
+
+def test_hls_segment_route_rejects_missing_cast_token_when_pin_set(client, make_file, monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_PIN", "1234")
+    f = make_file("clip.mkv", b"not real video data")
+    media_id = _insert_media(f, "video", video_codec="h264", audio_codec="aac", duration=5.0)
+
+    res = client.get(f"/api/stream/{media_id}/hls/segment_00000.ts")
+
+    assert res.status_code == 401
 
 
 def test_missing_file_on_disk_returns_404(client, make_file):
