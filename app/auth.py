@@ -44,6 +44,30 @@ _serializer = URLSafeTimedSerializer(SECRET_KEY, salt="parztream-session")
 _cast_serializer = URLSafeTimedSerializer(SECRET_KEY, salt="parztream-cast-token")
 CAST_TOKEN_MAX_AGE = 60 * 60 * 4  # a full movie plus slack, deliberately bounded
 
+# Volumetric cap on POST /api/cast-token/{id}, keyed by client IP like the
+# login lockout below -- but a simple fixed window, not an escalating
+# lockout, since minting a token isn't a guessing attack (nothing to
+# brute-force; the token itself is still a signed, unforgeable value). This
+# only exists to stop a script from minting unbounded tokens in a tight
+# loop; legitimate use (casting a title every so often) never comes close.
+CAST_TOKEN_RATE_LIMIT = 20
+CAST_TOKEN_RATE_WINDOW_SECONDS = 60
+_cast_token_requests: dict[str, list] = {}
+
+
+def check_cast_token_rate_limit(client_id: str) -> bool:
+    """True if client_id may mint another cast token right now; False if
+    it's already minted CAST_TOKEN_RATE_LIMIT within the trailing window."""
+    now = time.monotonic()
+    history = _cast_token_requests.setdefault(client_id, [])
+    cutoff = now - CAST_TOKEN_RATE_WINDOW_SECONDS
+    while history and history[0] < cutoff:
+        history.pop(0)
+    if len(history) >= CAST_TOKEN_RATE_LIMIT:
+        return False
+    history.append(now)
+    return True
+
 CAST_STREAM_PATH_RE = re.compile(r"^/api/stream/(\d+)(?:/hls/.+)?$")
 
 # A 4-digit PIN only has 10,000 possibilities, so unlike a real password it

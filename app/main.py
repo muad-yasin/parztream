@@ -2,12 +2,13 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import mdns, transcode
 from .auth import SessionAuthMiddleware
-from .config import AUTH_PIN
+from .config import AUTH_PIN, SECRET_KEY_IS_EPHEMERAL
 from .db import init_db
 from .routers import library, login, setup, stream
 
@@ -37,6 +38,13 @@ async def lifespan(app: FastAPI):
             "PARZTREAM_PIN is set but isn't a 4-digit PIN — login will still work, "
             "but the login page expects exactly 4 digits."
         )
+    if SECRET_KEY_IS_EPHEMERAL:
+        logger.warning(
+            "PARZTREAM_SECRET_KEY is not set — a random key was generated for this "
+            "run, so every login session will be invalidated the next time the "
+            "server restarts. Set PARZTREAM_SECRET_KEY to a fixed value to keep "
+            "sessions alive across restarts."
+        )
     mdns.start_mdns()
     yield
     mdns.stop_mdns()
@@ -49,6 +57,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="parztream", lifespan=lifespan)
 app.add_middleware(SessionAuthMiddleware)
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    # Without this, an uncaught exception (a corrupt DB row, an unexpected
+    # ffprobe/mutagen data shape, etc.) falls through to Starlette's bare
+    # default 500 -- no server-side log line pointing at what broke, and no
+    # guaranteed response shape. Every *expected* error path already raises
+    # HTTPException with a `detail` message; this only ever catches genuinely
+    # unexpected bugs, so the client always gets a generic message rather
+    # than a raw traceback.
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse({"detail": "Internal server error"}, status_code=500)
+
 
 app.include_router(library.router)
 app.include_router(stream.router)

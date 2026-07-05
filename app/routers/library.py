@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, Response
@@ -17,7 +17,7 @@ MAX_PAGE_SIZE = 500
 
 @router.get("/library")
 def list_media(
-    media_type: Optional[str] = None,
+    media_type: Optional[Literal["audio", "video"]] = None,
     show_name: Optional[str] = None,
     q: Optional[str] = None,
     is_movie: Optional[bool] = None,

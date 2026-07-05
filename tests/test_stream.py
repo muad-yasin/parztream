@@ -148,6 +148,19 @@ def test_cast_token_endpoint_404s_for_unknown_media_id(client):
     assert res.status_code == 404
 
 
+def test_cast_token_endpoint_rate_limits_repeated_requests(client, make_file, monkeypatch):
+    monkeypatch.setattr(auth, "_cast_token_requests", {})
+    f = make_file("clip.mp4", b"data")
+    media_id = _insert_media(f, "video")
+
+    for _ in range(auth.CAST_TOKEN_RATE_LIMIT):
+        res = client.post(f"/api/cast-token/{media_id}")
+        assert res.status_code == 200
+
+    res = client.post(f"/api/cast-token/{media_id}")
+    assert res.status_code == 429
+
+
 def test_stream_route_accepts_valid_cast_token_when_pin_set(client, make_file, monkeypatch):
     monkeypatch.setattr(auth, "AUTH_PIN", "1234")
     content = b"x" * 100

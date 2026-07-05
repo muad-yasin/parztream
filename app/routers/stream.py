@@ -29,7 +29,7 @@ def _get_media_row(media_id: int):
 
 
 @router.post("/cast-token/{media_id}")
-def create_cast_token_route(media_id: int):
+def create_cast_token_route(media_id: int, request: Request):
     # Only reachable by an already-authenticated browser session (or
     # unconditionally when no PIN is configured, same as every other route
     # here) -- this is the bridge that lets that authenticated sender hand a
@@ -37,6 +37,11 @@ def create_cast_token_route(media_id: int):
     # its own. See app/auth.py's CAST_STREAM_PATH_RE for where the token is
     # actually validated.
     _get_media_row(media_id)  # 404s for an unknown id, same as every other route here
+
+    client_id = request.client.host if request.client else "unknown"
+    if not auth.check_cast_token_rate_limit(client_id):
+        raise HTTPException(status_code=429, detail="Too many cast requests. Try again shortly.")
+
     return {"token": auth.create_cast_token(media_id)}
 
 

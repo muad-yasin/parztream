@@ -76,6 +76,7 @@ def isolated_app_state(tmp_path, media_dir, monkeypatch):
     # without clearing it a lockout triggered by one test's failed-login
     # attempts would leak into the next test using the same TestClient IP.
     auth._login_attempts.clear()
+    auth._cast_token_requests.clear()
     monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(artwork, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(cache, "CACHE_DIR", tmp_path / "cache")

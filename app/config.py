@@ -79,7 +79,12 @@ AUTH_PIN = os.environ.get("PARZTREAM_PIN")
 # generated at every process start -- simplest zero-config default, at the
 # cost of everyone's session getting invalidated (and needing to log in
 # again) on every restart. Set PARZTREAM_SECRET_KEY to a fixed random value
-# to keep sessions alive across restarts.
+# to keep sessions alive across restarts. SECRET_KEY_IS_EPHEMERAL records
+# which case this is so app/main.py's startup can warn about it -- without
+# that, a forgotten env var in a systemd/deploy setup silently signs
+# everyone out on every restart with no diagnostic trail at all (unlike the
+# analogous AUTH_PIN warnings main.py already has).
+SECRET_KEY_IS_EPHEMERAL = not os.environ.get("PARZTREAM_SECRET_KEY")
 SECRET_KEY = os.environ.get("PARZTREAM_SECRET_KEY") or secrets.token_hex(32)
 
 # How long a login lasts before needing to sign in again, in seconds.

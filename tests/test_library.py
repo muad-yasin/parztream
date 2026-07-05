@@ -52,6 +52,12 @@ def test_list_media_filters_by_type(client, make_file):
     assert body["items"][0]["media_type"] == "audio"
 
 
+def test_list_media_rejects_invalid_media_type(client):
+    res = client.get("/api/library", params={"media_type": "bogus"})
+
+    assert res.status_code == 422
+
+
 def test_list_media_is_paginated(client, make_file):
     for i in range(5):
         f = make_file(f"song{i}.mp3", b"a")
