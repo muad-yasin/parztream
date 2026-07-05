@@ -1,4 +1,4 @@
-from app import auth
+from app import auth, config
 
 
 def test_no_pin_configured_allows_open_access(client):
@@ -202,3 +202,42 @@ def test_successful_login_resets_lockout_escalation(client, monkeypatch):
     auth.register_successful_attempt(client_id)
 
     assert client_id not in auth._login_attempts
+
+
+def test_untrusted_host_is_rejected_even_with_no_pin_configured(client):
+    res = client.get("/api/library", headers={"host": "evil.example.com"})
+    assert res.status_code == 400
+
+
+def test_untrusted_host_is_rejected_against_setup_browse(client):
+    # The concrete vulnerability M7 addresses: with no PIN configured (the
+    # default), a DNS-rebinding page must not be able to reach the
+    # whole-filesystem folder browser via a spoofed Host.
+    res = client.get("/api/setup/browse", headers={"host": "evil.example.com"})
+    assert res.status_code == 400
+
+
+def test_private_lan_ip_host_is_trusted(client):
+    res = client.get("/api/library", headers={"host": "192.168.1.50"})
+    assert res.status_code == 200
+
+
+def test_mdns_local_hostname_is_trusted(client):
+    res = client.get("/api/library", headers={"host": "myhost.local"})
+    assert res.status_code == 200
+
+
+def test_trusted_host_with_port_is_accepted(client):
+    res = client.get("/api/library", headers={"host": "192.168.1.50:8080"})
+    assert res.status_code == 200
+
+
+def test_configured_extra_trusted_host_is_accepted(client, monkeypatch):
+    monkeypatch.setattr(config, "TRUSTED_HOSTS", {"media.example.internal"})
+    res = client.get("/api/library", headers={"host": "media.example.internal"})
+    assert res.status_code == 200
+
+
+def test_public_ip_host_is_rejected(client):
+    res = client.get("/api/library", headers={"host": "8.8.8.8"})
+    assert res.status_code == 400

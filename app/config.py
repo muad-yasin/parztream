@@ -104,6 +104,16 @@ PORT = _parse_int_env("PARZTREAM_PORT", 8000)
 
 MDNS_ENABLED = os.environ.get("PARZTREAM_MDNS_ENABLED", "true").lower() not in ("0", "false", "no")
 
+# Extra Host header values SessionAuthMiddleware should trust beyond its
+# built-in allowlist (localhost/loopback, *.local, and any private-use IP
+# literal -- see app/auth.py's _is_trusted_host). Needed for setups where the
+# request's Host header won't be one of those, e.g. a reverse proxy fronting
+# this app under a real hostname, or a Docker bridge network. Comma-separated,
+# compared case-insensitively, e.g. "media.example.internal,10.0.0.5".
+TRUSTED_HOSTS = {
+    h.strip().lower() for h in os.environ.get("PARZTREAM_TRUSTED_HOSTS", "").split(",") if h.strip()
+}
+
 # Enables real video re-encoding (not just container/audio remuxing) for
 # videos whose video codec itself can't be played in a browser (e.g. HEVC)
 # -- see app/transcode.py and app/encoder_detect.py. Off by default: even

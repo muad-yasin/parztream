@@ -1,3 +1,4 @@
+import ipaddress
 import secrets
 import time
 from http.cookies import SimpleCookie
@@ -7,6 +8,7 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse, RedirectResponse
 
+from . import config
 from .config import AUTH_PIN, SECRET_KEY, SESSION_MAX_AGE
 
 SESSION_COOKIE_NAME = "parztream_session"
@@ -91,6 +93,38 @@ def verify_session_cookie_value(value: str) -> bool:
         return False
 
 
+def _is_trusted_host(raw_host: str) -> bool:
+    """Guards against DNS rebinding: a remote page can get a browser to
+    resolve some attacker-controlled hostname to this server's LAN IP and
+    then treat requests to it as same-origin, reaching endpoints like
+    /api/setup/browse (whole-filesystem listing) and /api/setup (repointing
+    media dirs) as if it were a legitimate same-network client -- even with
+    no PIN configured, which is the default. Real LAN clients always arrive
+    with a Host that's either a loopback/mDNS name or a private-use IP
+    literal, never an arbitrary public hostname, so this allowlist covers
+    every legitimate way to reach this server without requiring the user to
+    configure anything (PARZTREAM_TRUSTED_HOSTS is the escape hatch for
+    reverse-proxy/Docker setups where that's not true)."""
+    if not raw_host:
+        return False
+    host = raw_host.lower()
+    if host.startswith("["):
+        # Bracketed IPv6 literal, e.g. "[::1]:8080" or "[::1]" -- RFC 7230
+        # requires brackets here specifically so a literal's own colons
+        # can't be confused with the port separator.
+        host = host[1:host.index("]")] if "]" in host else host[1:]
+    elif host.count(":") == 1:
+        host = host.rsplit(":", 1)[0]
+    if host in ("localhost", "127.0.0.1", "::1") or host.endswith(".local"):
+        return True
+    if host in config.TRUSTED_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_private
+    except ValueError:
+        return False
+
+
 class SessionAuthMiddleware:
     """Pure ASGI middleware (not BaseHTTPMiddleware) so it doesn't buffer
     StreamingResponse bodies — that matters here since /api/stream serves
@@ -102,7 +136,20 @@ class SessionAuthMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or not AUTH_PIN:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = Headers(scope=scope)
+        if not _is_trusted_host(headers.get("host", "")):
+            # Checked before the no-PIN short-circuit below: an untrusted
+            # Host is exactly as dangerous when no PIN is configured (the
+            # default) as when one is -- see _is_trusted_host's docstring.
+            response = JSONResponse({"detail": "Invalid host"}, status_code=400)
+            await response(scope, receive, send)
+            return
+
+        if not AUTH_PIN:
             await self.app(scope, receive, send)
             return
 
@@ -110,7 +157,6 @@ class SessionAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        headers = Headers(scope=scope)
         cookie_value = _get_cookie(headers, SESSION_COOKIE_NAME)
         if cookie_value and verify_session_cookie_value(cookie_value):
             await self.app(scope, receive, send)

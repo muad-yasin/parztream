@@ -1,3 +1,4 @@
+import shutil
 import threading
 from pathlib import Path
 
@@ -88,3 +89,20 @@ def prune(protect: Path = None):
             break
         f.unlink(missing_ok=True)
         total -= size
+
+
+def remove_orphans(media_ids):
+    """Delete cached HLS segments/thumbnails for media ids no longer present
+    in the DB (see app/scanner.py's _remove_missing, which calls this after
+    a scan). Unlike prune() above, this runs regardless of CACHE_MAX_BYTES --
+    it's about correctness (not serving/retaining content for media that no
+    longer exists), not budget eviction, so a orphaned {id}_hls/ dir would
+    otherwise persist indefinitely whenever no size cap is configured (the
+    default)."""
+    for media_id in media_ids:
+        hls_dir = CACHE_DIR / f"{media_id}_hls"
+        thumb = CACHE_DIR / f"{media_id}_thumb.jpg"
+        with lock_for(str(hls_dir)):
+            shutil.rmtree(hls_dir, ignore_errors=True)
+        with lock_for(str(thumb)):
+            thumb.unlink(missing_ok=True)

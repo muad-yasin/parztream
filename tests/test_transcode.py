@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import threading
@@ -1046,6 +1047,49 @@ def test_seeking_ahead_of_generated_segments_triggers_a_new_job_from_that_point(
     assert segment.name == "segment_00003.ts"
 
 
+def test_stale_cached_segments_are_invalidated_when_source_file_changes(tmp_path, monkeypatch):
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+
+    src_path = tmp_path / "clip.mkv"
+    src_path.write_bytes(b"original")
+
+    hls_dir = transcode.hls_dir_for(99)
+    hls_dir.mkdir(parents=True)
+    stale_segment = hls_dir / "segment_00000.ts"
+    stale_segment.write_bytes(b"stale segment content")
+
+    # Establish the marker against the file's current mtime -- not stale yet.
+    transcode._invalidate_if_source_changed(99, hls_dir, src_path)
+    assert stale_segment.is_file()
+
+    # Replace the source in place with a newer mtime -- same path, so same
+    # media_id/hls_dir, exactly the scenario M6 describes.
+    time.sleep(0.01)
+    src_path.write_bytes(b"replaced content")
+    os.utime(src_path, None)
+
+    transcode._invalidate_if_source_changed(99, hls_dir, src_path)
+
+    assert not stale_segment.is_file()
+
+
+def test_unchanged_source_file_keeps_cached_segments(tmp_path, monkeypatch):
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+
+    src_path = tmp_path / "clip.mkv"
+    src_path.write_bytes(b"original")
+
+    hls_dir = transcode.hls_dir_for(100)
+    hls_dir.mkdir(parents=True)
+    segment = hls_dir / "segment_00000.ts"
+    segment.write_bytes(b"segment content")
+
+    transcode._invalidate_if_source_changed(100, hls_dir, src_path)
+    transcode._invalidate_if_source_changed(100, hls_dir, src_path)
+
+    assert segment.is_file()
+
+
 @requires_ffmpeg
 def test_creating_a_new_segment_prunes_older_ones_once_over_budget(tmp_path, monkeypatch, h264_encoder):
     from app import cache as cache_module
@@ -1131,6 +1175,94 @@ def test_concurrent_requests_for_the_same_segment_only_invoke_ffmpeg_once(tmp_pa
     assert call_count == 1
     assert len(results) == 8
     assert all(r == results[0] for r in results)
+
+
+def test_ensure_segment_wakes_promptly_once_the_segment_becomes_valid(tmp_path, monkeypatch):
+    # Proves the event-driven wait actually wakes faster than the old
+    # 100ms poll interval would have -- generous margin to avoid flakiness
+    # on a loaded CI box, but well under what a second full poll cycle
+    # plus scheduling slop would need.
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"source bytes")
+
+    def fake_popen(cmd, **kwargs):
+        segment_path = Path(cmd[-1].replace("%05d", "00000"))
+
+        def on_communicate():
+            time.sleep(0.3)
+            segment_path.parent.mkdir(parents=True, exist_ok=True)
+            segment_path.write_bytes(b"fake segment")
+            Path(cmd[-1].replace("%05d", "00001")).write_bytes(b"fake next segment")
+            return b"", b"", 0
+
+        return _FakeProcess(on_communicate)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        start = time.monotonic()
+        transcode.ensure_segment(200, f, remux_audio=False, index=0)
+        elapsed = time.monotonic() - start
+
+    # The segment isn't written until ~0.3s in; a prompt wake should return
+    # well before a second 100ms poll tick would add much slop on top.
+    assert elapsed < 0.5
+
+
+def test_many_waiters_share_a_single_progress_poller(tmp_path, monkeypatch):
+    # Before this fix, every ensure_segment caller ran its own independent
+    # sleep(0.1)-poll loop against _highest_contiguous_segment -- N waiters
+    # meant N threads churning through filesystem checks. Now there should
+    # be exactly one poller per job, so the call count is bounded by
+    # elapsed time / poll interval, not by the number of waiting threads.
+    monkeypatch.setattr(transcode, "CACHE_DIR", tmp_path / "cache")
+
+    f = tmp_path / "clip.mkv"
+    f.write_bytes(b"source bytes")
+
+    call_count = 0
+    call_count_lock = threading.Lock()
+    real_highest_contiguous_segment = transcode._highest_contiguous_segment
+
+    def counting_wrapper(hls_dir, start):
+        nonlocal call_count
+        with call_count_lock:
+            call_count += 1
+        return real_highest_contiguous_segment(hls_dir, start)
+
+    monkeypatch.setattr(transcode, "_highest_contiguous_segment", counting_wrapper)
+
+    def fake_popen(cmd, **kwargs):
+        segment_path = Path(cmd[-1].replace("%05d", "00000"))
+
+        def on_communicate():
+            time.sleep(0.3)
+            segment_path.parent.mkdir(parents=True, exist_ok=True)
+            segment_path.write_bytes(b"fake segment")
+            Path(cmd[-1].replace("%05d", "00001")).write_bytes(b"fake next segment")
+            return b"", b"", 0
+
+        return _FakeProcess(on_communicate)
+
+    results = []
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        threads = [
+            threading.Thread(
+                target=lambda: results.append(transcode.ensure_segment(201, f, remux_audio=False, index=0))
+            )
+            for _ in range(8)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    assert len(results) == 8
+    # ~0.3s of polling at a 0.1s interval is roughly 3-4 calls from the one
+    # poller thread; _check_jobs_locked also calls this per _find_or_start_job
+    # invocation (once per waiter, i.e. up to 8 more) -- bounded well below
+    # what 8 independent 100ms-poll waiter loops over 0.3s+ would produce.
+    assert call_count < 30
 
 
 def test_ffmpeg_failure_surfaces_as_remux_failed(tmp_path, monkeypatch):

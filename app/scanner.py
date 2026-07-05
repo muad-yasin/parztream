@@ -9,7 +9,7 @@ from pathlib import Path
 
 from mutagen import File as MutagenFile
 
-from . import settings, transcode
+from . import cache, settings, transcode
 from .config import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS
 from .db import get_connection
 
@@ -168,7 +168,9 @@ def scan_media_dirs():
                         continue
                     _scan_state["scanned_count"] += 1
 
-        _remove_missing(conn, found_paths, scanned_roots)
+        deleted_ids = _remove_missing(conn, found_paths, scanned_roots)
+
+    cache.remove_orphans(deleted_ids)
 
 
 def _record_scan_failure(path: Path, exc: Exception):
@@ -818,12 +820,16 @@ def _probe_duration_via_packets(path: Path):
     return last_pts
 
 
-def _remove_missing(conn, found_paths: set, scanned_roots: list):
+def _remove_missing(conn, found_paths: set, scanned_roots: list) -> list:
     """Delete rows for files no longer found on disk -- but only rows that
     live under a root this scan actually walked. A configured dir that was
     unavailable this run (unmounted NAS, unplugged USB drive) contributes no
     scanned_roots entry at all, so its rows are left completely alone rather
-    than being wiped just because nothing was seen under it this time."""
+    than being wiped just because nothing was seen under it this time.
+    Returns the ids of deleted rows so the caller can clean up their cached
+    HLS segments/thumbnails (see cache.remove_orphans) -- otherwise those
+    would leak in CACHE_DIR forever whenever no size cap is configured."""
+    deleted_ids = []
     existing = conn.execute("SELECT id, path FROM media").fetchall()
     for row in existing:
         if row["path"] in found_paths:
@@ -831,3 +837,5 @@ def _remove_missing(conn, found_paths: set, scanned_roots: list):
         path = Path(row["path"])
         if any(path.is_relative_to(root) for root in scanned_roots):
             conn.execute("DELETE FROM media WHERE id = ?", (row["id"],))
+            deleted_ids.append(row["id"])
+    return deleted_ids

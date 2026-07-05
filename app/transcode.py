@@ -427,6 +427,15 @@ class _Job:
         self.start_index = start_index
         self.reencode_video = reencode_video
         self.done = threading.Event()
+        # Set whenever _poll_job_progress notices a new segment has
+        # appeared (see below) -- lets ensure_segment's waiters block on an
+        # Event instead of each independently sleep-polling the filesystem
+        # every 100ms, which is what actually pressures the FastAPI
+        # threadpool when hls.js prefetches several segments from several
+        # concurrent viewers. Cleared by each waiter after waking (not by
+        # the poller), so a pulse can't be lost between two waiters that
+        # both had it set and haven't rechecked yet.
+        self.progress_event = threading.Event()
         self.error: RemuxFailed | None = None
         # Bumped every time a segment request is routed to this job (see
         # _check_jobs_locked) -- used by _reap_idle_jobs_locked to find jobs
@@ -510,6 +519,32 @@ def _highest_contiguous_segment(hls_dir: Path, start: int) -> int:
     return idx - 1
 
 
+_SOURCE_MTIME_MARKER = ".source_mtime"
+
+
+def _invalidate_if_source_changed(media_id: int, hls_dir: Path, src_path: Path) -> None:
+    """Mirrors app/artwork.py's get_video_thumbnail mtime check: a cached
+    segment existing on disk isn't proof it's still valid if the source file
+    at this path was replaced in-place since the segment was cut (same path
+    => same media_id => same hls_dir, so nothing else would ever notice).
+    Deliberately a separate marker from _FORMAT_MARKER above, which is a
+    one-time migration flag that's never revisited once set -- this one is
+    checked on every call."""
+    marker = hls_dir / _SOURCE_MTIME_MARKER
+    try:
+        source_mtime = src_path.stat().st_mtime
+    except FileNotFoundError:
+        return
+    try:
+        stale = marker.stat().st_mtime < source_mtime
+    except FileNotFoundError:
+        stale = False
+    if stale:
+        invalidate_segments(media_id)
+        hls_dir.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+
+
 def ensure_segment(
     media_id: int, src_path: Path, remux_audio: bool, index: int,
     reencode_video: bool = False, video_width=None, video_height=None,
@@ -538,6 +573,7 @@ def ensure_segment(
     hls_dir = hls_dir_for(media_id)
     hls_dir.mkdir(parents=True, exist_ok=True)
     _ensure_segment_format(media_id, hls_dir)
+    _invalidate_if_source_changed(media_id, hls_dir, src_path)
     target = _segment_path(hls_dir, index)
 
     job = _find_or_start_job(
@@ -573,7 +609,15 @@ def ensure_segment(
             raise FileNotFoundError(f"segment {index} was never produced")
         if time.monotonic() > deadline:
             raise TimeoutError(f"timed out waiting for segment {index}")
-        time.sleep(0.1)
+        # Block on the job's progress event instead of an unconditional
+        # sleep(0.1) -- wakes as soon as _poll_job_progress notices new
+        # segment data, rather than up to 100ms late every iteration. Still
+        # re-checks the real filesystem predicate above on every wake (the
+        # event alone can't tell "my segment" from "some other segment"),
+        # and clears the event itself (not the poller) so a pulse can't be
+        # lost between two waiters that were both woken by the same set().
+        job.progress_event.wait(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
+        job.progress_event.clear()
 
 
 def _find_or_start_job(
@@ -968,7 +1012,30 @@ def _start_job(
         _all_processes.add(process)
     job = _Job(process, effective_index, reencode_video)
     threading.Thread(target=_watch_job, args=(job, hls_dir), daemon=True).start()
+    threading.Thread(target=_poll_job_progress, args=(job, hls_dir), daemon=True).start()
     return job
+
+
+def _poll_job_progress(job: "_Job", hls_dir: Path):
+    """The one place that still polls the filesystem for this job -- ffmpeg
+    itself can't notify Python when it rotates to a new segment file, so
+    something has to keep checking. Doing it here, once per job, is the
+    actual fix for thread-pool pressure: previously every ensure_segment
+    caller waiting on this job ran its own independent sleep(0.1) poll loop,
+    so N concurrent viewers meant N threads churning through os.stat calls.
+    Now there's exactly one poller regardless of how many requests are
+    waiting; they just block on job.progress_event instead. Note this does
+    NOT eliminate one thread being parked per in-flight request -- that's
+    inherent to ensure_segment being called synchronously from FastAPI's
+    sync threadpool, and fixing that would need an async route with an
+    async wait primitive, out of scope here."""
+    last_seen = job.start_index - 1
+    while not job.done.is_set():
+        current = _highest_contiguous_segment(hls_dir, job.start_index)
+        if current != last_seen:
+            last_seen = current
+            job.progress_event.set()
+        job.done.wait(timeout=0.1)
 
 
 def _watch_job(job: "_Job", hls_dir: Path):
@@ -988,6 +1055,7 @@ def _watch_job(job: "_Job", hls_dir: Path):
         # this specific job (see ensure_segment) gets a plain
         # FileNotFoundError once job.done is set below, same as any other
         # "job finished without producing this segment" case.
+        job.progress_event.set()
         job.done.set()
         return
     if job.process.returncode != 0:
@@ -999,6 +1067,7 @@ def _watch_job(job: "_Job", hls_dir: Path):
         job.error = RemuxFailed(message)
     else:
         cache.prune()
+    job.progress_event.set()
     job.done.set()
 
 

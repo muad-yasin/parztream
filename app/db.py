@@ -42,6 +42,18 @@ CREATE TABLE IF NOT EXISTS settings (
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    # WAL lets readers and writers avoid blocking each other -- without it,
+    # a long-running scan (app/scanner.py holds one connection open for its
+    # entire walk, since ffprobe/keyframe-probe timeouts per file can add up
+    # to minutes) could make a concurrent POST /api/setup write fail with
+    # "database is locked". A persistent, once-set property of the DB file
+    # itself, so this is a cheap no-op on every connection after the first.
+    # busy_timeout is raised from sqlite3's 5s connect-time default to 10s as
+    # a second line of defense for genuine writer-vs-writer contention WAL
+    # doesn't eliminate on its own (e.g. a scan's writes to `media` and
+    # /api/setup's write to `settings` landing at the same moment).
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
     try:
         yield conn
         conn.commit()

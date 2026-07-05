@@ -45,29 +45,32 @@ added a third, lowest-priority scanner heuristic (a bare leading
 cleaned of bracket groups and season-token-onward junk) plus scanner
 tests using the real structure. Rescan to regroup the episodes.
 
+**Resolved 2026-07-05 (second pass this same day)**: **M1**, **M6**,
+**M7**, and **PP2** (see Poor Performance section below for PP2's
+write-up). M1: `app/db.py`'s `get_connection()` now sets
+`PRAGMA journal_mode=WAL` and `PRAGMA busy_timeout=10000` — WAL lets
+readers/writers avoid blocking each other, which is the actual cause of
+`POST /api/setup` hitting "database is locked" during a long scan;
+chose this over restructuring `scan_media_dirs` into per-directory
+commits since `_remove_missing` needs the whole scan's `found_paths` set
+anyway, and a home library rescan after a crash is cheap. M6:
+`ensure_segment` (`app/transcode.py`) now compares the source file's
+mtime against a `.source_mtime` marker in its `hls_dir` (mirroring
+`get_video_thumbnail`'s existing pattern) and calls the already-existing
+`invalidate_segments` when the source changed in place; separately,
+`app/scanner.py`'s `_remove_missing` now returns the ids it deletes, and
+`scan_media_dirs` passes them to a new `cache.remove_orphans()` that
+deletes `{id}_hls/`/`{id}_thumb.jpg` for media no longer in the DB,
+unconditionally (not gated behind `CACHE_MAX_BYTES`). M7:
+`SessionAuthMiddleware` (`app/auth.py`) now rejects requests whose
+`Host` header isn't loopback/`.local`/a private-use IP literal (plus an
+opt-in `PARZTREAM_TRUSTED_HOSTS` allowlist for reverse-proxy setups),
+checked *before* the no-PIN short-circuit so it also protects the
+default no-PIN-configured state — the exact gap this item described.
+Verified: full unit suite + `tests/e2e` green, including a real-browser
+check that `/api/setup/browse` 400s on a spoofed Host with no PIN set.
+
 ## Medium
-
-- [ ] **M1. Entire scan runs as one SQLite write transaction**
-  (`app/scanner.py`). With 10s ffprobe and 240s packet-scan timeouts per
-  file, a large scan holds the write lock for hours: `POST /api/setup`
-  fails with "database is locked" (5s busy timeout), and a crash loses all
-  scan progress. Commit incrementally (per directory) or enable WAL in
-  `app/db.py`.
-
-- [ ] **M6. HLS cache has no freshness check; orphaned cache dirs leak.**
-  Thumbnails check mtime (`app/artwork.py`); `ensure_segment`
-  (`app/transcode.py`) trusts any leftover segment — replace a file in
-  place (same path ⇒ same id) and playback serves stale/mixed segments.
-  `{id}_hls/` dirs and thumbs for deleted media are never cleaned unless
-  `CACHE_MAX_BYTES` is set (unset by default).
-
-- [ ] **M7. No Host-header validation → DNS rebinding crosses the LAN
-  boundary.** A remote page can reach `http://<lan-ip>:8000` as
-  same-origin via rebinding; with no PIN (the default) that includes
-  `/api/setup/browse` (whole-filesystem listing) and `/api/setup`
-  (repointing media dirs). Even with a PIN, cross-site "simple" POSTs
-  (text/plain form bodies) reach JSON endpoints. Cheap mitigation: reject
-  unexpected `Host` values in `SessionAuthMiddleware`.
 
 ## Low
 
@@ -241,16 +244,21 @@ genuinely can't fix (see TS_SAFE_VIDEO_CODECS).
 
 ## Poor performance
 
-- [ ] **PP2. Threadpool exhaustion under modest concurrency.** Each
-  in-flight segment request still parks a sync-pool thread in a 0.1s poll
-  loop (up to 30s, `ensure_segment`); hls.js prefetches several. Partially
-  mitigated this session (idle jobs no longer run/hold threads
-  indefinitely once abandoned, and a busy transcode slot now fails fast
-  with 503 instead of hanging), but the core "one thread per in-flight
-  segment request" architecture is unchanged -- 2-3 concurrent viewers can
-  still pressure the thread pool. Real fix: event-driven segment waits
-  (a per-segment `threading.Event` signaled by the job watcher instead of
-  polling).
+- [x] **PP2. Threadpool exhaustion under modest concurrency.** *Partially
+  fixed (2026-07-05): each HLS job now has exactly one dedicated poller
+  thread (`_poll_job_progress` in `app/transcode.py`) that watches the
+  filesystem for new segments and signals a per-job `threading.Event`;
+  `ensure_segment`'s waiters block on that event instead of each running
+  their own independent `sleep(0.1)` poll loop -- N concurrent viewers
+  waiting on the same job used to mean N threads churning through
+  `os.stat` calls every 100ms, now it's one. This fixes the CPU-churn/
+  wake-latency cost, not the fact that one FastAPI sync-threadpool thread
+  is still parked per in-flight request -- that's inherent to
+  `ensure_segment` being called synchronously, and a true fix for
+  thread-pool* exhaustion* (as opposed to churn) needs an async route with
+  an async wait primitive. Left open below as the still-real remaining
+  gap.* Real fix for the remaining part: convert the segment-wait path to
+  async so a waiting request releases its thread instead of blocking it.
 - [ ] **PP4. Slow starts are structural.** probe → playlist → spawn
   ffmpeg → wait for segment 0 *and* 1 (completion heuristic needs N+1)
   → several seconds to first frame even on fast disks.

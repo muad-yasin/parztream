@@ -94,6 +94,20 @@ def test_scan_removes_rows_for_files_deleted_from_disk(make_file, monkeypatch):
     assert _rows() == []
 
 
+def test_scan_cleans_up_cache_for_files_deleted_from_disk(make_file, monkeypatch):
+    monkeypatch.setattr(scanner, "_extract_metadata", lambda p, t, *a, **kw: _metadata(title=p.stem))
+    f = make_file("song.mp3")
+    scanner.scan_media_dirs()
+    media_id = _rows()[0]["id"]
+
+    f.unlink()
+    calls = []
+    monkeypatch.setattr(scanner.cache, "remove_orphans", lambda ids: calls.append(list(ids)))
+    scanner.scan_media_dirs()
+
+    assert calls == [[media_id]]
+
+
 def test_unavailable_media_dir_does_not_wipe_its_existing_rows(monkeypatch, tmp_path):
     # Simulates an unmounted NAS / unplugged USB drive: a configured root
     # that has real scanned rows from a previous run, but isn't a directory

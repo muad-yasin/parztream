@@ -131,3 +131,27 @@ def test_lock_for_returns_different_locks_for_different_keys():
     a = cache.lock_for("key-a")
     b = cache.lock_for("key-b")
     assert a is not b
+
+
+def test_remove_orphans_deletes_hls_dir_and_thumbnail(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(cache, "CACHE_DIR", cache_dir)
+
+    hls_dir = cache_dir / "42_hls"
+    hls_dir.mkdir(parents=True)
+    (hls_dir / "segment_00000.ts").write_bytes(b"x")
+    thumb = cache_dir / "42_thumb.jpg"
+    thumb.write_bytes(b"x")
+
+    cache.remove_orphans([42])
+
+    assert not hls_dir.exists()
+    assert not thumb.exists()
+
+
+def test_remove_orphans_tolerates_already_missing_files(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(cache, "CACHE_DIR", cache_dir)
+    cache_dir.mkdir(parents=True)
+
+    cache.remove_orphans([123])  # nothing exists for id 123 -- must not raise

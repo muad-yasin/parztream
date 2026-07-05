@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 
 from app import db
 
@@ -63,3 +64,42 @@ def test_init_db_is_idempotent_once_migrated():
     db.init_db()  # a second run must not try to re-ALTER an existing column
 
     assert "segment_boundaries" in _media_columns()
+
+
+def test_get_connection_enables_wal_mode():
+    with db.get_connection() as conn:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode.lower() == "wal"
+
+
+def test_concurrent_read_does_not_block_on_an_open_write_connection():
+    # The actual regression test for M1: without WAL, a reader hitting a
+    # connection with an open write transaction gets "database is locked"
+    # (sqlite3's default busy_timeout is only 5s). A large scan holding one
+    # connection open for its whole run must not cause a concurrent
+    # POST /api/setup-style read/write to fail this way.
+    db.init_db()
+    write_conn = sqlite3.connect(db.DB_PATH)
+    write_conn.execute("PRAGMA journal_mode=WAL")
+    write_conn.execute("BEGIN IMMEDIATE")
+    write_conn.execute("INSERT INTO settings (key, value) VALUES ('probe', 'value')")
+
+    result = {}
+
+    def read_in_another_connection():
+        try:
+            with db.get_connection() as conn:
+                conn.execute("SELECT * FROM media").fetchall()
+            result["ok"] = True
+        except sqlite3.OperationalError as exc:
+            result["ok"] = False
+            result["error"] = str(exc)
+
+    t = threading.Thread(target=read_in_another_connection)
+    t.start()
+    t.join(timeout=5)
+
+    write_conn.rollback()
+    write_conn.close()
+
+    assert result.get("ok") is True, result.get("error")

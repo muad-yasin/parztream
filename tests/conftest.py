@@ -99,5 +99,5 @@ def isolated_app_state(tmp_path, media_dir, monkeypatch):
 
 @pytest.fixture
 def client():
-    with TestClient(main.app) as c:
+    with TestClient(main.app, base_url="http://localhost") as c:
         yield c
